@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>SuperAgent 本地任务控制室</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+
+    <header class="masthead">
+      <div class="masthead__rail" aria-hidden="true">
+        <span>OPS / 01</span>
+        <span>LOCAL LOOPBACK</span>
+      </div>
+      <div class="masthead__body">
+        <div class="mode-lockup">
+          <span class="mode-badge">LOCAL PRACTICE</span>
+          <span class="mode-note">本地实战模式，不是真实 GitHub/DSH</span>
+        </div>
+        <div class="title-block">
+          <p class="eyebrow">SuperAgent · Governed delivery loop</p>
+          <h1>把一次请求，推进成<br><span>可审计的交付证据。</span></h1>
+          <p class="lede">
+            生命周期是本地模拟；真实 Git branch、test、commit、patch 会写入隔离仓库。
+            沿唯一下一步，观察 Ticket 如何被执行、恢复和结束。
+          </p>
+        </div>
+        <dl class="masthead__telemetry" aria-label="当前运行模式">
+          <div>
+            <dt>MODE</dt>
+            <dd>LOCAL / SAFE</dd>
+          </div>
+          <div>
+            <dt>PHASE</dt>
+            <dd id="header-phase">LOADING</dd>
+          </div>
+          <div>
+            <dt>EVIDENCE</dt>
+            <dd>GIT / TEST / PATCH</dd>
+          </div>
+        </dl>
+      </div>
+    </header>
+
+    <main id="main-content" tabindex="-1">
+      <section id="guided-action" class="guided" aria-labelledby="guided-title">
+        <div class="guided__signal" aria-hidden="true">NEXT /</div>
+        <div class="guided__copy">
+          <p class="section-kicker">Guided operation</p>
+          <h2 id="guided-title">唯一下一步</h2>
+          <p id="action-description" class="guided__description">
+            正在读取持久化状态与本机就绪度。
+          </p>
+          <label class="issue-input" for="issue-text">
+            <span>可选：写一句本地 Issue 请求</span>
+            <input
+              id="issue-text"
+              name="issue-text"
+              type="text"
+              maxlength="400"
+              autocomplete="off"
+              placeholder="例如：100% 折扣应返回 0"
+            >
+          </label>
+        </div>
+        <div class="guided__control">
+          <span class="phase-label">CURRENT PHASE</span>
+          <strong id="current-phase">LOADING</strong>
+          <button id="guided-action-button" class="button button--primary" type="button">
+            读取状态…
+          </button>
+          <p class="control-hint">操作完成后会同时刷新 state 与 doctor。</p>
+        </div>
+      </section>
+
+      <section id="lifecycle" class="lifecycle" aria-labelledby="lifecycle-title">
+        <header class="section-heading">
+          <div>
+            <p class="section-kicker">Governed lifecycle</p>
+            <h2 id="lifecycle-title">请求到合并的控制链</h2>
+          </div>
+          <p>高亮节点表示当前进度；每一步都保留到时间线。</p>
+        </header>
+        <ol class="pipeline" aria-label="SuperAgent 生命周期进度">
+          <li data-stage="issue" aria-label="Issue，等待中">
+            <span class="pipeline__index">01</span><span>Issue</span>
+          </li>
+          <li data-stage="trigger" aria-label="Trigger，等待中">
+            <span class="pipeline__index">02</span><span>Trigger</span>
+          </li>
+          <li data-stage="eval" aria-label="Eval，等待中">
+            <span class="pipeline__index">03</span><span>Eval</span>
+          </li>
+          <li data-stage="ticket" aria-label="Ticket，等待中">
+            <span class="pipeline__index">04</span><span>Ticket</span>
+          </li>
+          <li data-stage="worker" aria-label="Worker，等待中">
+            <span class="pipeline__index">05</span><span>Worker</span>
+          </li>
+          <li data-stage="review" aria-label="PR / Review，等待中">
+            <span class="pipeline__index">06</span><span>PR / Review</span>
+          </li>
+          <li data-stage="merge" aria-label="Merge，等待中">
+            <span class="pipeline__index">07</span><span>Merge</span>
+          </li>
+        </ol>
+      </section>
+
+      <div class="evidence-layout">
+        <section id="ticket" class="panel panel--ticket" aria-labelledby="ticket-title">
+          <header class="panel__header">
+            <div>
+              <p class="section-kicker">Execution ledger</p>
+              <h2 id="ticket-title">Ticket / Worker</h2>
+            </div>
+            <span id="ticket-status" class="status-chip">NOT CREATED</span>
+          </header>
+          <dl class="metric-grid">
+            <div>
+              <dt>Ticket</dt>
+              <dd id="ticket-id">—</dd>
+            </div>
+            <div>
+              <dt>Worker slot</dt>
+              <dd id="worker-slot">LOCAL · 01</dd>
+            </div>
+            <div>
+              <dt>Session</dt>
+              <dd id="ticket-session">—</dd>
+            </div>
+            <div>
+              <dt>Branch</dt>
+              <dd id="ticket-branch">—</dd>
+            </div>
+            <div>
+              <dt>Commits</dt>
+              <dd id="ticket-commits">0</dd>
+            </div>
+            <div>
+              <dt>Tests</dt>
+              <dd id="ticket-tests">WAITING</dd>
+            </div>
+          </dl>
+          <div class="commit-ledger">
+            <h3>提交记录</h3>
+            <ol id="commit-list" aria-label="Ticket 提交记录">
+              <li>尚无 worker commit</li>
+            </ol>
+          </div>
+        </section>
+
+        <section id="timeline" class="panel panel--timeline" aria-labelledby="timeline-title">
+          <header class="panel__header">
+            <div>
+              <p class="section-kicker">Audit trail</p>
+              <h2 id="timeline-title">Timeline</h2>
+            </div>
+            <span id="timeline-count" class="counter">00 EVENTS</span>
+          </header>
+          <ol id="timeline-list" class="timeline-list" aria-label="生命周期事件">
+            <li class="timeline-list__empty">等待第一个事件</li>
+          </ol>
+        </section>
+
+        <section id="patch" class="panel panel--patch" aria-labelledby="patch-title">
+          <header class="panel__header panel__header--patch">
+            <div>
+              <p class="section-kicker">Pull request evidence</p>
+              <h2 id="patch-title">PR-style patch</h2>
+            </div>
+            <span id="patch-meta">NO DIFF</span>
+          </header>
+          <div class="patch-scroll" tabindex="0" aria-label="Git patch，可横向滚动">
+            <pre id="patch-output"># Worker 完成 assignment 后，这里显示真实 git diff。</pre>
+          </div>
+        </section>
+      </div>
+
+      <section id="boundary" class="boundary" aria-labelledby="boundary-title">
+        <header class="section-heading">
+          <div>
+            <p class="section-kicker">Trust boundary</p>
+            <h2 id="boundary-title">哪些是真实，哪些会被替换</h2>
+          </div>
+          <p>演示不连接远程服务，也不会向真实仓库推送。</p>
+        </header>
+        <div class="boundary__columns">
+          <article>
+            <span class="boundary__mark boundary__mark--real">LOCAL / REAL</span>
+            <h3>本地真实发生</h3>
+            <ul>
+              <li>创建隔离 Git repository 与工作分支</li>
+              <li>先跑失败回归，再完成 GREEN test</li>
+              <li>写入真实 commit，并生成完整 patch</li>
+              <li>状态持久化，页面重载后继续</li>
+            </ul>
+          </article>
+          <article>
+            <span class="boundary__mark boundary__mark--replace">PROD / ADAPTER</span>
+            <h3>生产模式替换</h3>
+            <ul>
+              <li>本地 Issue 模拟器 → GitHub webhook</li>
+              <li>确定性 worker → DSH Session</li>
+              <li>本地 review thread → GitHub Pull Request</li>
+              <li>本地 merge 终态 → 受保护分支合并</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section id="doctor" class="doctor" aria-labelledby="doctor-title">
+        <header class="section-heading section-heading--doctor">
+          <div>
+            <p class="section-kicker">Production readiness</p>
+            <h2 id="doctor-title">Doctor / Live-mode gate</h2>
+          </div>
+          <span id="doctor-status" class="doctor__status">CHECKING</span>
+        </header>
+        <div class="doctor__grid">
+          <div>
+            <h3>Readiness checks</h3>
+            <ul id="doctor-checks" class="check-list">
+              <li>正在检查本机环境…</li>
+            </ul>
+          </div>
+          <div class="blocker-block">
+            <h3>Blockers</h3>
+            <ul id="doctor-blockers">
+              <li>等待 doctor 返回结果</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <aside class="operator-bar" aria-labelledby="operator-title">
+        <div class="operator-bar__copy">
+          <p class="section-kicker">Operator controls</p>
+          <h2 id="operator-title">操作说明与状态</h2>
+          <p>使用上方主按钮推进流程。重置会重建本地 runtime repository；doctor 只执行只读检查。</p>
+          <p id="operation-status" class="operation-status" role="status" aria-live="polite" aria-atomic="true">
+            正在连接本地控制面…
+          </p>
+        </div>
+        <div class="operator-bar__actions">
+          <button id="doctor-refresh-button" class="button button--secondary" type="button">
+            刷新 Doctor
+          </button>
+          <button id="reset-button" class="button button--danger" type="button">
+            重置本地演示
+          </button>
+        </div>
+      </aside>
+    </main>
+
+    <footer class="footer">
+      <span>SUPERAGENT / LOCAL CONTROL ROOM</span>
+      <span>NO REMOTE WRITE · LOOPBACK ONLY</span>
+    </footer>
+  </body>
+</html>
