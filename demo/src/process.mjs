@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1_048_576;
+const TIMEOUT_GRACE_MS = 200;
 
 export class ProcessError extends Error {
   constructor(message, result, options = {}) {
@@ -15,7 +16,10 @@ function validateOptions(command, args, options) {
   if (typeof command !== 'string' || command.length === 0) {
     throw new TypeError('command must be a non-empty string');
   }
-  if (!Array.isArray(args) || args.some((argument) => typeof argument !== 'string')) {
+  if (
+    !Array.isArray(args) ||
+    args.some((argument) => typeof argument !== 'string')
+  ) {
     throw new TypeError('args must be an array of strings');
   }
   if (typeof options.cwd !== 'string' || options.cwd.length === 0) {
@@ -51,9 +55,14 @@ export function runProcess(command, args = [], options = {}) {
     let timedOut = false;
     let settled = false;
     let forceKillTimer;
+    const usesPosixProcessGroup = process.platform !== 'win32';
+    const terminationScope = usesPosixProcessGroup
+      ? 'posix-process-group'
+      : 'direct-child-fallback';
 
     const child = spawn(command, args, {
       cwd: normalizedOptions.cwd,
+      detached: usesPosixProcessGroup,
       env: normalizedOptions.env,
       shell: false,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -74,34 +83,42 @@ export function runProcess(command, args = [], options = {}) {
       }
     };
 
-    child.stdout.on('data', (chunk) => capture(stdoutChunks, chunk));
-    child.stderr.on('data', (chunk) => capture(stderrChunks, chunk));
+    const onStdout = (chunk) => capture(stdoutChunks, chunk);
+    const onStderr = (chunk) => capture(stderrChunks, chunk);
+    child.stdout.on('data', onStdout);
+    child.stderr.on('data', onStderr);
 
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGTERM');
-      forceKillTimer = setTimeout(() => child.kill('SIGKILL'), 1_000);
-      forceKillTimer.unref();
-    }, normalizedOptions.timeoutMs);
-    timeout.unref();
+    const sendSignal = (signal) => {
+      if (usesPosixProcessGroup && child.pid) {
+        try {
+          process.kill(-child.pid, signal);
+          return;
+        } catch (error) {
+          if (error.code !== 'ESRCH') child.kill(signal);
+          return;
+        }
+      }
+      child.kill(signal);
+    };
 
-    child.once('error', (cause) => {
-      if (settled) return;
-      settled = true;
+    let timeout;
+    const cleanup = ({ destroyStreams = false } = {}) => {
       clearTimeout(timeout);
       clearTimeout(forceKillTimer);
-      reject(
-        new ProcessError(`Failed to start process: ${command}`, undefined, {
-          cause,
-        }),
-      );
-    });
+      child.removeListener('error', onError);
+      child.removeListener('close', onClose);
+      child.stdout.removeListener('data', onStdout);
+      child.stderr.removeListener('data', onStderr);
+      if (destroyStreams) {
+        child.stdout.destroy();
+        child.stderr.destroy();
+      }
+    };
 
-    child.once('close', (code, signal) => {
+    const settle = (code, signal, options = {}) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timeout);
-      clearTimeout(forceKillTimer);
+      cleanup(options);
 
       const result = {
         stdout: Buffer.concat(stdoutChunks).toString('utf8'),
@@ -110,6 +127,7 @@ export function runProcess(command, args = [], options = {}) {
         signal,
         timedOut,
         outputTruncated,
+        terminationScope,
       };
 
       if (normalizedOptions.rejectOnNonZero && (timedOut || code !== 0)) {
@@ -119,6 +137,34 @@ export function runProcess(command, args = [], options = {}) {
       }
 
       resolve(result);
-    });
+    };
+
+    const onError = (cause) => {
+      if (settled) return;
+      settled = true;
+      cleanup({ destroyStreams: true });
+      reject(
+        new ProcessError(`Failed to start process: ${command}`, undefined, {
+          cause,
+        }),
+      );
+    };
+    const onClose = (code, signal) => settle(code, signal);
+
+    child.once('error', onError);
+    child.once('close', onClose);
+
+    timeout = setTimeout(() => {
+      timedOut = true;
+      sendSignal('SIGTERM');
+      forceKillTimer = setTimeout(() => {
+        sendSignal('SIGKILL');
+        settle(child.exitCode, child.signalCode ?? 'SIGKILL', {
+          destroyStreams: true,
+        });
+      }, TIMEOUT_GRACE_MS);
+      forceKillTimer.unref();
+    }, normalizedOptions.timeoutMs);
+    timeout.unref();
   });
 }

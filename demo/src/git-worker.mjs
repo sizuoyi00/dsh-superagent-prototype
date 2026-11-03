@@ -3,17 +3,20 @@ import {
   cp,
   lstat,
   mkdir,
+  mkdtemp,
   open,
   readdir,
   readFile,
   realpath,
   rename,
+  rm,
   unlink,
 } from 'node:fs/promises';
 import {
   basename,
   dirname,
   isAbsolute,
+  parse,
   relative,
   resolve,
   sep,
@@ -31,9 +34,23 @@ const TEST_FILE = 'test/discount.test.mjs';
 const IMPLEMENTATION_FILE = 'src/discount.mjs';
 const README_FILE = 'README.md';
 const TEST_COMMAND = 'node --test';
-const { NODE_TEST_CONTEXT: ignoredTestContext, ...TEST_ENVIRONMENT } = process.env;
-const GIT_ENVIRONMENT = Object.fromEntries(
-  Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')),
+const CHILD_ENVIRONMENT_NAMES = [
+  'PATH',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+  'SystemRoot',
+  'WINDIR',
+  'PATHEXT',
+  'ComSpec',
+];
+const TEST_ENVIRONMENT = Object.fromEntries(
+  CHILD_ENVIRONMENT_NAMES.flatMap((name) =>
+    process.env[name] === undefined ? [] : [[name, process.env[name]]],
+  ),
 );
 
 const FIRST_REGRESSION_TEST = `test('returns zero for a 100 percent discount', () => {
@@ -130,6 +147,37 @@ async function assertTreeHasNoSymbolicLinks(treePath) {
   );
 }
 
+async function assertTrustedDirectoryPath(directoryPath) {
+  const { root } = parse(directoryPath);
+  const components = relative(root, directoryPath).split(sep).filter(Boolean);
+  let currentPath = root;
+
+  for (const component of components) {
+    currentPath = resolve(currentPath, component);
+    const metadata = await lstat(currentPath);
+    if (metadata.isSymbolicLink()) {
+      throw new GitWorkerError('Repository parent contains a symbolic link');
+    }
+    if (!metadata.isDirectory()) {
+      throw new GitWorkerError('Repository parent must contain only directories');
+    }
+  }
+}
+
+async function createGitControlDirectory(controlDirectory) {
+  await Promise.all([
+    mkdir(resolve(controlDirectory, 'hooks'), { recursive: true }),
+    mkdir(resolve(controlDirectory, 'home'), { recursive: true }),
+    mkdir(resolve(controlDirectory, 'xdg'), { recursive: true }),
+  ]);
+  const configHandle = await open(
+    resolve(controlDirectory, 'global.config'),
+    'wx',
+    0o600,
+  );
+  await configHandle.close();
+}
+
 export class GitWorker {
   #fixtureDir;
   #repoDir;
@@ -162,32 +210,78 @@ export class GitWorker {
       throw new GitWorkerError('Git worker has already been initialized');
     }
 
+    const repositoryParent = dirname(this.#repoDir);
+    let stagingDirectory;
     this.#stage = 'initializing';
     try {
+      await assertTrustedDirectoryPath(repositoryParent);
       await this.#assertRepositoryDoesNotExist();
       await assertTreeHasNoSymbolicLinks(this.#fixtureDir);
-      await mkdir(dirname(this.#repoDir), { recursive: true });
-      await cp(this.#fixtureDir, this.#repoDir, {
-        recursive: true,
-        errorOnExist: true,
-        force: false,
-      });
-      await this.#git(['init', '--initial-branch=main']);
-      await this.#git(['config', '--local', 'user.name', 'SuperAgent Demo']);
+      stagingDirectory = await mkdtemp(
+        resolve(repositoryParent, `.${basename(this.#repoDir)}.staging-`),
+      );
+      const fixtureEntries = await readdir(this.#fixtureDir);
+      await Promise.all(
+        fixtureEntries.map((entry) =>
+          cp(
+            resolve(this.#fixtureDir, entry),
+            resolve(stagingDirectory, entry),
+            { recursive: true, errorOnExist: true, force: false },
+          ),
+        ),
+      );
+      const bootstrapGitControl = resolve(
+        stagingDirectory,
+        '.superagent-git-control',
+      );
+      await createGitControlDirectory(bootstrapGitControl);
+      await this.#git(
+        ['init', '--initial-branch=main'],
+        stagingDirectory,
+        bootstrapGitControl,
+      );
+      await rename(
+        bootstrapGitControl,
+        resolve(stagingDirectory, '.git/superagent-control'),
+      );
+      await this.#git(
+        ['config', '--local', 'user.name', 'SuperAgent Demo'],
+        stagingDirectory,
+      );
       await this.#git([
         'config',
         '--local',
         'user.email',
         'superagent-demo@example.invalid',
-      ]);
-      await this.#git(['add', '--all']);
-      await this.#git(['commit', '-m', INITIAL_COMMIT_MESSAGE]);
-      this.#initialCommit = (await this.#git(['rev-parse', 'HEAD'])).stdout.trim();
+      ], stagingDirectory);
+      await this.#git(['add', '--all'], stagingDirectory);
+      await this.#git(
+        ['commit', '-m', INITIAL_COMMIT_MESSAGE],
+        stagingDirectory,
+      );
+      const initialCommit = (
+        await this.#git(['rev-parse', 'HEAD'], stagingDirectory)
+      ).stdout.trim();
+      await assertTrustedDirectoryPath(repositoryParent);
+      await this.#assertRepositoryDoesNotExist();
+      await rename(stagingDirectory, this.#repoDir);
+      stagingDirectory = undefined;
+      this.#initialCommit = initialCommit;
       this.#stage = 'ready';
 
       return { branch: 'main', initialCommit: this.#initialCommit };
     } catch (cause) {
-      this.#stage = 'failed';
+      if (stagingDirectory) {
+        try {
+          await rm(stagingDirectory, { recursive: true, force: true });
+        } catch (cleanupError) {
+          cause = new AggregateError(
+            [cause, cleanupError],
+            'Repository initialization and staging cleanup both failed',
+          );
+        }
+      }
+      this.#stage = 'uninitialized';
       throw this.#wrapError('Failed to initialize the runtime repository', cause);
     }
   }
@@ -207,6 +301,19 @@ export class GitWorker {
       );
     }
 
+    const writeTargets =
+      phase === 'initial'
+        ? [TEST_FILE, IMPLEMENTATION_FILE]
+        : [TEST_FILE, IMPLEMENTATION_FILE, README_FILE];
+    try {
+      await this.#assertSafeWriteTargets(writeTargets);
+    } catch (cause) {
+      throw this.#wrapError(
+        `Failed to validate ${phase} assignment write targets`,
+        cause,
+      );
+    }
+    const checkpoint = await this.#captureAssignmentCheckpoint();
     this.#stage = `${phase}-running`;
     try {
       const result =
@@ -216,17 +323,29 @@ export class GitWorker {
       this.#stage = phase === 'initial' ? 'initial-complete' : 'complete';
       return result;
     } catch (cause) {
-      this.#stage = 'failed';
+      try {
+        await this.#assertSafeWriteTargets(writeTargets);
+        await this.#rollbackAssignment(checkpoint);
+        this.#stage = checkpoint.stage;
+      } catch (rollbackCause) {
+        this.#stage = 'failed';
+        cause = new AggregateError(
+          [cause, rollbackCause],
+          'Assignment execution and rollback both failed',
+        );
+      }
       throw this.#wrapError(`Failed to run ${phase} assignment`, cause);
     }
   }
 
   async #runInitialAssignment() {
-    await this.#assertSafeWriteTargets([TEST_FILE, IMPLEMENTATION_FILE]);
     await this.#git(['checkout', '-b', ASSIGNMENT_BRANCH]);
     await this.#appendToFile(TEST_FILE, FIRST_REGRESSION_TEST);
     const redResult = await this.#runTests();
-    this.#requireRed(redResult, '100 percent discount');
+    this.#requireRed(
+      redResult,
+      'returns zero for a 100 percent discount',
+    );
 
     await this.#replaceInFile(
       IMPLEMENTATION_FILE,
@@ -240,14 +359,9 @@ export class GitWorker {
   }
 
   async #runFollowUpAssignment() {
-    await this.#assertSafeWriteTargets([
-      TEST_FILE,
-      IMPLEMENTATION_FILE,
-      README_FILE,
-    ]);
     await this.#appendToFile(TEST_FILE, FOLLOW_UP_REGRESSION_TEST);
     const redResult = await this.#runTests();
-    this.#requireRed(redResult, 'non-finite inputs');
+    this.#requireRed(redResult, 'rejects non-finite inputs');
 
     await this.#replaceInFile(
       IMPLEMENTATION_FILE,
@@ -279,9 +393,60 @@ export class GitWorker {
     return this.#createResult(redResult, greenResult);
   }
 
+  async #captureAssignmentCheckpoint() {
+    const [branchResult, headResult, assignmentBranchResult] =
+      await Promise.all([
+        this.#git(['branch', '--show-current']),
+        this.#git(['rev-parse', 'HEAD']),
+        this.#git([
+          'branch',
+          '--list',
+          '--format=%(refname:short)',
+          ASSIGNMENT_BRANCH,
+        ]),
+      ]);
+
+    return Object.freeze({
+      stage: this.#stage,
+      branch: branchResult.stdout.trim(),
+      head: headResult.stdout.trim(),
+      assignmentBranchExisted:
+        assignmentBranchResult.stdout.trim() === ASSIGNMENT_BRANCH,
+    });
+  }
+
+  async #rollbackAssignment(checkpoint) {
+    await this.#git(['reset', '--hard', checkpoint.head]);
+    await this.#git(['clean', '-fd']);
+    if (checkpoint.branch) {
+      await this.#git(['checkout', '--force', checkpoint.branch]);
+    } else {
+      await this.#git(['checkout', '--detach', checkpoint.head]);
+    }
+    await this.#git(['reset', '--hard', checkpoint.head]);
+
+    if (
+      checkpoint.branch !== ASSIGNMENT_BRANCH &&
+      !checkpoint.assignmentBranchExisted
+    ) {
+      const assignmentBranchResult = await this.#git([
+        'branch',
+        '--list',
+        '--format=%(refname:short)',
+        ASSIGNMENT_BRANCH,
+      ]);
+      if (assignmentBranchResult.stdout.trim() === ASSIGNMENT_BRANCH) {
+        await this.#git(['branch', '-D', ASSIGNMENT_BRANCH]);
+      }
+    }
+  }
+
   async #assertRepositoryDoesNotExist() {
     try {
-      await lstat(this.#repoDir);
+      const metadata = await lstat(this.#repoDir);
+      if (metadata.isSymbolicLink()) {
+        throw new GitWorkerError('Runtime repository cannot be a symbolic link');
+      }
       throw new GitWorkerError('Runtime repository path already exists');
     } catch (error) {
       if (error.code !== 'ENOENT') throw error;
@@ -422,20 +587,53 @@ export class GitWorker {
   }
 
   async #runTests(rejectOnNonZero = false) {
-    return this.#processRunner(process.execPath, ['--test'], {
+    const result = await this.#processRunner(process.execPath, ['--test'], {
       cwd: this.#repoDir,
       timeoutMs: 30_000,
       maxOutputBytes: 1_048_576,
       rejectOnNonZero,
-      env: TEST_ENVIRONMENT,
+      env: { ...TEST_ENVIRONMENT },
     });
+    if (result.code === 0 && result.outputTruncated) {
+      throw new GitWorkerError('Successful test output was truncated');
+    }
+    return result;
   }
 
   #requireRed(result, expectedTestName) {
     const output = combineOutput(result);
-    if (result.code === 0 || !output.includes(expectedTestName)) {
+    const diagnosticBoundary = output.indexOf('\n✖ failing tests:');
+    const primaryOutput =
+      diagnosticBoundary === -1
+        ? output
+        : output.slice(0, diagnosticBoundary);
+    const failedTestNames = [
+      ...Array.from(
+        primaryOutput.matchAll(/^not ok \d+ - (.+)\r?$/gm),
+        ([, testName]) => testName,
+      ),
+      ...Array.from(
+        primaryOutput.matchAll(/^✖ (.+?)(?: \([\d.]+ms\))?\r?$/gm),
+        ([, testName]) => testName,
+      ),
+    ];
+    const failSummaries = Array.from(
+      output.matchAll(/^(?:#|ℹ) fail (\d+)\r?$/gm),
+      ([, failureCount]) => Number(failureCount),
+    );
+    const hasStrictRedEvidence =
+      result.code === 1 &&
+      result.signal === null &&
+      result.timedOut === false &&
+      result.outputTruncated === false &&
+      failedTestNames.length === 1 &&
+      failedTestNames[0] === expectedTestName &&
+      failSummaries.length === 1 &&
+      failSummaries[0] === 1;
+
+    if (!hasStrictRedEvidence) {
       throw new GitWorkerError(
-        `Regression test did not fail for ${expectedTestName}`,
+        `Regression test did not provide strict red evidence for ${expectedTestName}`,
       );
     }
   }
@@ -499,24 +697,52 @@ export class GitWorker {
     );
   }
 
-  async #git(args) {
-    return this.#processRunner('git', args, {
-      cwd: this.#repoDir,
+  async #git(
+    args,
+    cwd = this.#repoDir,
+    controlDirectory = resolve(cwd, '.git/superagent-control'),
+  ) {
+    const gitEnvironment = {
+      ...TEST_ENVIRONMENT,
+      HOME: resolve(controlDirectory, 'home'),
+      XDG_CONFIG_HOME: resolve(controlDirectory, 'xdg'),
+      GIT_CONFIG_GLOBAL: resolve(controlDirectory, 'global.config'),
+      GIT_CONFIG_NOSYSTEM: '1',
+    };
+    const isolatedArgs = [
+      '-c',
+      `core.hooksPath=${resolve(controlDirectory, 'hooks')}`,
+      ...args,
+    ];
+    const result = await this.#processRunner('git', isolatedArgs, {
+      cwd,
       timeoutMs: 30_000,
       maxOutputBytes: 1_048_576,
       rejectOnNonZero: true,
-      env: GIT_ENVIRONMENT,
+      env: gitEnvironment,
     });
+    if (result.outputTruncated) {
+      throw new GitWorkerError('Git command output was truncated');
+    }
+    return result;
   }
 
   #wrapError(message, cause) {
-    if (cause instanceof GitWorkerError) return cause;
-    if (cause instanceof ProcessError && cause.result) {
-      const detail = combineOutput(cause.result);
-      return new GitWorkerError(detail ? `${message}: ${detail}` : message, {
-        cause,
-      });
+    const sanitizePublicText = (value) =>
+      sanitizeResult(
+        sanitizeResult(value, this.#fixtureDir),
+        this.#repoDir,
+      );
+    if (cause instanceof GitWorkerError) {
+      const publicMessage = sanitizePublicText(cause.message);
+      if (publicMessage === cause.message) return cause;
+      return new GitWorkerError(publicMessage, { cause });
     }
-    return new GitWorkerError(message, { cause });
+    if (cause instanceof ProcessError && cause.result) {
+      const detail = sanitizePublicText(combineOutput(cause.result));
+      const publicMessage = detail ? `${message}: ${detail}` : message;
+      return new GitWorkerError(sanitizePublicText(publicMessage), { cause });
+    }
+    return new GitWorkerError(sanitizePublicText(message), { cause });
   }
 }
