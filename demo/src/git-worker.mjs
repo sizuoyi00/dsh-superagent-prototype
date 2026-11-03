@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import {
   cp,
   lstat,
-  mkdir,
   mkdtemp,
   open,
   readdir,
@@ -23,6 +22,12 @@ import {
 } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import {
+  assertGitSafety,
+  captureGitSafety,
+  createGitControlDirectory,
+  SAFE_GIT_CONFIG_ENTRIES,
+} from './git-safety.mjs';
 import { ProcessError, runProcess } from './process.mjs';
 
 export const ASSIGNMENT_BRANCH = 'agent/demo-discount-boundary';
@@ -178,20 +183,6 @@ async function assertTrustedDirectoryPath(directoryPath) {
   }
 }
 
-async function createGitControlDirectory(controlDirectory) {
-  await Promise.all([
-    mkdir(resolve(controlDirectory, 'hooks'), { recursive: true }),
-    mkdir(resolve(controlDirectory, 'home'), { recursive: true }),
-    mkdir(resolve(controlDirectory, 'xdg'), { recursive: true }),
-  ]);
-  const configHandle = await open(
-    resolve(controlDirectory, 'global.config'),
-    'wx',
-    0o600,
-  );
-  await configHandle.close();
-}
-
 export class GitWorker {
   #fixtureDir;
   #repoDir;
@@ -269,6 +260,9 @@ export class GitWorker {
         'user.email',
         'superagent-demo@example.invalid',
       ], stagingDirectory);
+      for (const [key, value] of SAFE_GIT_CONFIG_ENTRIES) {
+        await this.#git(['config', '--local', key, value], stagingDirectory);
+      }
       await this.#git(['add', '--all'], stagingDirectory);
       await this.#git(
         ['commit', '-m', INITIAL_COMMIT_MESSAGE],
@@ -435,74 +429,24 @@ export class GitWorker {
     });
   }
 
-  #gitIdentityPaths() {
-    const gitDirectory = resolve(this.#repoDir, '.git');
-    const controlDirectory = resolve(gitDirectory, 'superagent-control');
-    return [
-      { path: this.#repoDir, kind: 'directory' },
-      { path: gitDirectory, kind: 'directory' },
-      { path: controlDirectory, kind: 'directory' },
-      { path: resolve(controlDirectory, 'home'), kind: 'directory' },
-      { path: resolve(controlDirectory, 'xdg'), kind: 'directory' },
-      { path: resolve(controlDirectory, 'hooks'), kind: 'directory' },
-      { path: resolve(controlDirectory, 'global.config'), kind: 'file' },
-    ];
-  }
-
   async #captureGitIdentity() {
-    let identities = [];
     try {
-      for (const { path, kind } of this.#gitIdentityPaths()) {
-        const metadata = await lstat(path);
-        const hasExpectedKind =
-          kind === 'directory'
-            ? metadata.isDirectory()
-            : metadata.isFile();
-        if (metadata.isSymbolicLink() || !hasExpectedKind) {
-          throw new GitWorkerError('Git metadata identity is invalid');
-        }
-        const canonicalPath = await realpath(path);
-        if (!isWithin(this.#repoDir, canonicalPath)) {
-          throw new GitWorkerError('Git metadata identity escapes repository');
-        }
-        identities = [
-          ...identities,
-          Object.freeze({
-            path,
-            kind,
-            canonicalPath,
-            device: metadata.dev,
-            inode: metadata.ino,
-          }),
-        ];
-      }
+      return await captureGitSafety(this.#repoDir);
     } catch (cause) {
-      if (cause instanceof GitWorkerError) throw cause;
       throw new GitWorkerError('Git metadata identity is unavailable', {
         cause,
       });
     }
-    return Object.freeze(identities);
   }
 
   async #assertGitIdentity() {
     if (!this.#gitIdentity) {
       throw new GitWorkerError('Git metadata identity was not recorded');
     }
-    const currentIdentity = await this.#captureGitIdentity();
-    const matches = currentIdentity.every((current, index) => {
-      const expected = this.#gitIdentity[index];
-      return (
-        expected !== undefined &&
-        current.path === expected.path &&
-        current.kind === expected.kind &&
-        current.canonicalPath === expected.canonicalPath &&
-        current.device === expected.device &&
-        current.inode === expected.inode
-      );
-    });
-    if (!matches || currentIdentity.length !== this.#gitIdentity.length) {
-      throw new GitWorkerError('Git metadata identity changed');
+    try {
+      await assertGitSafety(this.#repoDir, this.#gitIdentity);
+    } catch (cause) {
+      throw new GitWorkerError('Git metadata identity changed', { cause });
     }
   }
 
@@ -527,7 +471,7 @@ export class GitWorker {
         ASSIGNMENT_BRANCH,
       ]);
       if (assignmentBranchResult.stdout.trim() === ASSIGNMENT_BRANCH) {
-        await this.#git(['branch', '-D', ASSIGNMENT_BRANCH]);
+        await this.#git(['update-ref', '-d', `refs/heads/${ASSIGNMENT_BRANCH}`]);
       }
     }
   }
@@ -742,9 +686,15 @@ export class GitWorker {
           '--format=%H%x09%s',
           `${this.#initialCommit}..HEAD`,
         ]),
-        this.#git(['diff', `${this.#initialCommit}..HEAD`, '--']),
         this.#git([
           'diff',
+          '--no-ext-diff',
+          `${this.#initialCommit}..HEAD`,
+          '--',
+        ]),
+        this.#git([
+          'diff',
+          '--no-ext-diff',
           '--name-only',
           `${this.#initialCommit}..HEAD`,
           '--',
