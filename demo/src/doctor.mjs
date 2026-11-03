@@ -1,7 +1,9 @@
 import { runProcess } from './process.mjs';
 
-const MINIMUM_NODE_VERSION = Object.freeze([22, 0, 0]);
-const MINIMUM_GH_VERSION = Object.freeze([2, 48, 0]);
+const MINIMUM_NODE_22_VERSION = createVersion(22, 19, 0);
+const MINIMUM_GIT_VERSION = createVersion(2, 32, 0);
+const MINIMUM_GH_VERSION = createVersion(2, 48, 0);
+const MINIMUM_DSH_VERSION = createVersion(0, 2, 1, ['alpha', 2]);
 const PROBE_TIMEOUT_MS = 2_500;
 const PROBE_MAX_OUTPUT_BYTES = 16 * 1024;
 
@@ -9,24 +11,89 @@ function createCheck(id, status, label, detail) {
   return Object.freeze({ id, status, label, detail });
 }
 
+function createVersion(major, minor, patch, prerelease = []) {
+  return Object.freeze({
+    major,
+    minor,
+    patch,
+    prerelease: Object.freeze([...prerelease]),
+  });
+}
+
 function parseVersion(value) {
   if (typeof value !== 'string') return undefined;
-  const match = value.match(/(?:^|[^\d])(\d+)\.(\d+)\.(\d+)(?:[^\d]|$)/);
+  const match = value.match(
+    /(?:^|[^0-9A-Za-z])v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?=$|[^0-9A-Za-z.+-])/,
+  );
   if (!match) return undefined;
-  return Object.freeze(match.slice(1).map(Number));
+  const core = match.slice(1, 4);
+  if (core.some((part) => part.length > 1 && part.startsWith('0'))) {
+    return undefined;
+  }
+  const prereleaseParts = match[4]?.split('.') ?? [];
+  if (prereleaseParts.some((part) => /^0\d+$/.test(part))) {
+    return undefined;
+  }
+  const prerelease = prereleaseParts.map((identifier) =>
+    /^\d+$/.test(identifier) ? Number(identifier) : identifier,
+  );
+  return createVersion(...core.map(Number), prerelease);
 }
 
 function formatVersion(version) {
-  return version.join('.');
+  const core = `${version.major}.${version.minor}.${version.patch}`;
+  return version.prerelease.length === 0
+    ? core
+    : `${core}-${version.prerelease.join('.')}`;
+}
+
+function compareIdentifiers(left, right) {
+  if (left === right) return 0;
+  if (left === undefined) return -1;
+  if (right === undefined) return 1;
+  if (typeof left === 'number' && typeof right !== 'number') return -1;
+  if (typeof left !== 'number' && typeof right === 'number') return 1;
+  return left < right ? -1 : 1;
+}
+
+function compareVersions(left, right) {
+  for (const field of ['major', 'minor', 'patch']) {
+    if (left[field] !== right[field]) return left[field] < right[field] ? -1 : 1;
+  }
+  if (left.prerelease.length === 0 || right.prerelease.length === 0) {
+    return left.prerelease.length === right.prerelease.length
+      ? 0
+      : left.prerelease.length === 0 ? 1 : -1;
+  }
+  const identifierCount = Math.max(
+    left.prerelease.length,
+    right.prerelease.length,
+  );
+  for (let index = 0; index < identifierCount; index += 1) {
+    const comparison = compareIdentifiers(
+      left.prerelease[index],
+      right.prerelease[index],
+    );
+    if (comparison !== 0) return comparison;
+  }
+  return 0;
 }
 
 function isAtLeast(version, minimum) {
-  return minimum.every((minimumPart, index) => {
-    const precedingPartsMatch = minimum
-      .slice(0, index)
-      .every((part, precedingIndex) => version[precedingIndex] === part);
-    return !precedingPartsMatch || version[index] >= minimumPart;
-  });
+  return compareVersions(version, minimum) >= 0;
+}
+
+function isSupportedNode(version) {
+  if (version.prerelease.length > 0) return false;
+  return version.major === 22
+    ? isAtLeast(version, MINIMUM_NODE_22_VERSION)
+    : version.major >= 24;
+}
+
+function isSupportedDsh(version) {
+  if (version.major !== 0 || version.minor !== 2) return false;
+  if (!isAtLeast(version, MINIMUM_DSH_VERSION)) return false;
+  return version.prerelease.length === 0 || version.patch === 1;
 }
 
 function isMissingCommand(error) {
@@ -73,12 +140,12 @@ function failureDetail(probeResult, name) {
 
 function checkNode(nodeVersion) {
   const version = parseVersion(nodeVersion);
-  if (!version || !isAtLeast(version, MINIMUM_NODE_VERSION)) {
+  if (!version || !isSupportedNode(version)) {
     return createCheck(
       'node',
       'blocked',
       'Node.js runtime',
-      'Live mode requires Node.js 22 or newer.',
+      'Live mode requires Node.js ^22.19.0 or >=24.0.0.',
     );
   }
   return createCheck(
@@ -99,13 +166,27 @@ function checkGit(probeResult) {
     );
   }
   const version = parseVersion(probeResult.result.stdout);
+  if (!version) {
+    return createCheck(
+      'git',
+      'blocked',
+      'Git CLI',
+      'Git version could not be determined.',
+    );
+  }
+  if (!isAtLeast(version, MINIMUM_GIT_VERSION)) {
+    return createCheck(
+      'git',
+      'blocked',
+      'Git CLI',
+      'Live mode requires Git 2.32.0 or newer.',
+    );
+  }
   return createCheck(
     'git',
     'ready',
     'Git CLI',
-    version
-      ? `Git ${formatVersion(version)} is available.`
-      : 'Git is available.',
+    `Git ${formatVersion(version)} is supported.`,
   );
 }
 
@@ -172,11 +253,28 @@ function checkDsh(probeResult) {
       failureDetail(probeResult, 'DeepSeek Harness CLI'),
     );
   }
+  const version = parseVersion(probeResult.result.stdout);
+  if (!version) {
+    return createCheck(
+      'dsh',
+      'blocked',
+      'DeepSeek Harness CLI',
+      'DeepSeek Harness CLI version could not be determined.',
+    );
+  }
+  if (!isSupportedDsh(version)) {
+    return createCheck(
+      'dsh',
+      'blocked',
+      'DeepSeek Harness CLI',
+      'Live mode requires DeepSeek Harness CLI ^0.2.1-alpha.2.',
+    );
+  }
   return createCheck(
     'dsh',
     'ready',
     'DeepSeek Harness CLI',
-    'DeepSeek Harness CLI is available.',
+    `DeepSeek Harness CLI ${formatVersion(version)} is supported.`,
   );
 }
 

@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict';
+import { dirname, resolve } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { checkLiveReadiness } from '../src/doctor.mjs';
+import { runProcess } from '../src/process.mjs';
 
 const CHECKOUT_DIRECTORY = '/workspace/dsh-superagent';
+const REAL_CHECKOUT_DIRECTORY = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  '../..',
+);
 
 function processResult(stdout = '', overrides = {}) {
   return Object.freeze({
@@ -55,6 +62,32 @@ async function runDoctor(overrides = {}) {
     ...overrides.options,
   });
   return { ...injected, result };
+}
+
+async function captureRepositoryState() {
+  const commands = [
+    ['rev-parse', 'HEAD'],
+    ['for-each-ref', '--format=%(refname):%(objectname)'],
+    ['status', '--porcelain=v1', '--untracked-files=all'],
+  ];
+  const results = await Promise.all(
+    commands.map((args) =>
+      runProcess('git', args, {
+        cwd: REAL_CHECKOUT_DIRECTORY,
+        timeoutMs: 2_500,
+        maxOutputBytes: 64 * 1024,
+      }),
+    ),
+  );
+  for (const result of results) {
+    assert.equal(result.code, 0);
+    assert.equal(result.timedOut, false);
+  }
+  return Object.freeze({
+    head: results[0].stdout,
+    refs: results[1].stdout,
+    status: results[2].stdout,
+  });
 }
 
 test('reports ready when every required live dependency is available', async () => {
@@ -136,29 +169,85 @@ test('reports missing commands as blockers without rejecting', async () => {
   );
 });
 
-test('blocks unsupported Node and GitHub CLI versions', async () => {
+test('enforces the project Node.js engine range', async () => {
+  const cases = [
+    ['22.18.0', 'blocked'],
+    ['22.19.0', 'ready'],
+    ['23.0.0', 'blocked'],
+    ['24.0.0', 'ready'],
+    ['25.6.1', 'ready'],
+  ];
+
+  for (const [nodeVersion, expectedStatus] of cases) {
+    const { result } = await runDoctor({ options: { nodeVersion } });
+    const nodeCheck = result.checks.find(({ id }) => id === 'node');
+
+    assert.equal(nodeCheck.status, expectedStatus, nodeVersion);
+    assert.equal(result.ready, expectedStatus === 'ready', nodeVersion);
+  }
+});
+
+test('blocks an unsupported GitHub CLI version', async () => {
   const responses = availableResponses({
     'gh --version': processResult('gh version 2.47.9\n'),
   });
 
-  const { result } = await runDoctor({
-    responses,
-    options: { nodeVersion: '20.18.1' },
-  });
+  const { result } = await runDoctor({ responses });
 
   assert.equal(result.ready, false);
   assert.deepEqual(
     result.blockers.map(({ id }) => id),
-    ['node', 'gh'],
-  );
-  assert.match(
-    result.checks.find(({ id }) => id === 'node').detail,
-    /requires Node\.js 22 or newer/i,
+    ['gh'],
   );
   assert.match(
     result.checks.find(({ id }) => id === 'gh').detail,
     /requires GitHub CLI 2\.48 or newer/i,
   );
+});
+
+test('requires Git 2.32.0 or newer with a parseable version', async () => {
+  const cases = [
+    ['git version 2.31.9\n', 'blocked'],
+    ['git version 2.32.0\n', 'ready'],
+    ['git version unavailable\n', 'blocked'],
+  ];
+
+  for (const [versionOutput, expectedStatus] of cases) {
+    const responses = availableResponses({
+      'git --version': processResult(versionOutput),
+    });
+    const { result } = await runDoctor({ responses });
+    const gitCheck = result.checks.find(({ id }) => id === 'git');
+
+    assert.equal(gitCheck.status, expectedStatus, versionOutput.trim());
+    assert.equal(result.ready, expectedStatus === 'ready', versionOutput.trim());
+  }
+});
+
+test('enforces the supported DeepSeek Harness prerelease range', async () => {
+  const cases = [
+    ['dsh 0.1.9\n', 'blocked'],
+    ['dsh 0.2.1-alpha.1\n', 'blocked'],
+    ['dsh 0.2.1-alpha.02\n', 'blocked'],
+    ['dsh 0.2.1-alpha.2\n', 'ready'],
+    ['dsh 0.2.1-alpha.10\n', 'ready'],
+    ['dsh 0.2.1-rc.1\n', 'ready'],
+    ['dsh 0.2.1\n', 'ready'],
+    ['dsh 0.2.9\n', 'ready'],
+    ['dsh 0.3.0\n', 'blocked'],
+    ['dsh version unavailable\n', 'blocked'],
+  ];
+
+  for (const [versionOutput, expectedStatus] of cases) {
+    const responses = availableResponses({
+      'dsh --version': processResult(versionOutput),
+    });
+    const { result } = await runDoctor({ responses });
+    const dshCheck = result.checks.find(({ id }) => id === 'dsh');
+
+    assert.equal(dshCheck.status, expectedStatus, versionOutput.trim());
+    assert.equal(result.ready, expectedStatus === 'ready', versionOutput.trim());
+  }
 });
 
 test('reports an unauthenticated GitHub CLI as a blocker', async () => {
@@ -266,4 +355,25 @@ test('never returns command output, tokens, or environment dumps', async () => {
   assert.doesNotMatch(serialized, /ghp_sensitive_value/);
   assert.doesNotMatch(serialized, /environment-secret|private\/home/);
   assert.doesNotMatch(serialized, /Logged in with/);
+});
+
+test('the real process adapter leaves repository state unchanged', async (t) => {
+  try {
+    const before = await captureRepositoryState();
+    const result = await checkLiveReadiness({ cwd: REAL_CHECKOUT_DIRECTORY });
+    const after = await captureRepositoryState();
+
+    assert.equal(typeof result.ready, 'boolean');
+    assert.deepEqual(
+      result.checks.map(({ id }) => id),
+      ['node', 'git', 'gh', 'gh-auth', 'dsh', 'source'],
+    );
+    assert.deepEqual(after, before);
+  } catch (error) {
+    if (error?.cause?.code === 'ENOENT') {
+      t.skip('Git is unavailable for the real-adapter smoke test');
+      return;
+    }
+    throw error;
+  }
 });
