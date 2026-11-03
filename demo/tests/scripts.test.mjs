@@ -32,13 +32,21 @@ async function createTemporaryDirectory(t, prefix) {
 async function createTapNode(t, summary) {
   const binaryDirectory = await createTemporaryDirectory(t, 'superagent-fake-node-');
   const nodePath = join(binaryDirectory, 'node');
-  const source = `#!/bin/sh
-case \${1-} in
-  -e|--check)
-    exit 0
-    ;;
-  --test)
-    printf '%s\\n' \\
+  let tapOutput;
+  if (summary.tapMode === 'missing') {
+    tapOutput = `    printf '%s\\n' 'TAP version 13'\n`;
+  } else if (summary.tapMode === 'malformed') {
+    tapOutput = `    printf '%s\\n' \\
+      'TAP version 13' \\
+      '1..4' \\
+      '# tests invalid' \\
+      '# pass 4' \\
+      '# fail zero' \\
+      '# cancelled 0' \\
+      '# skipped 0' \\
+      '# todo 0'\n`;
+  } else {
+    tapOutput = `    printf '%s\\n' \\
       'TAP version 13' \\
       '1..${summary.tests}' \\
       '# tests ${summary.tests}' \\
@@ -47,8 +55,15 @@ case \${1-} in
       '# fail ${summary.fail}' \\
       '# cancelled ${summary.cancelled}' \\
       '# skipped ${summary.skipped}' \\
-      '# todo ${summary.todo}'
+      '# todo ${summary.todo}'\n`;
+  }
+  const source = `#!/bin/sh
+case \${1-} in
+  -e|--check)
     exit 0
+    ;;
+  --test)
+${tapOutput}    exit ${summary.exitStatus ?? 0}
     ;;
 esac
 printf 'unexpected fake node arguments\\n' >&2
@@ -74,15 +89,15 @@ if [ "\${NODE_OPTIONS+x}" = x ] ||
   exit 90
 fi
 
+printf '%s\\0' "$#" "$@" >> '${callsPath}'
+
 case \${1-} in
   -e)
     [ "$#" -eq 2 ] || exit 91
-    printf 'version\\n' >> '${callsPath}'
     exit 0
     ;;
   --check)
     [ "$#" -eq 2 ] || exit 92
-    printf 'check\\n' >> '${callsPath}'
     exit 0
     ;;
   --test)
@@ -107,7 +122,6 @@ case \${1-} in
         *) exit 95 ;;
       esac
     done
-    printf 'tests %s %s\\n' "$suite" "$#" >> '${callsPath}'
     printf '%s\\n' \\
       'TAP version 13' \\
       "1..$expected" \\
@@ -143,6 +157,31 @@ function withCleanupRepository(snippet, repositoryPath) {
     'repo=/absolute/path/to/dsh-superagent',
     `repo=${quotedPath}`,
   );
+}
+
+function extractNodeVersionProbe(source) {
+  const match = source.match(/"\$NODE_BIN" -e '([\s\S]*?)'; then/);
+  assert.ok(match, 'Node version probe must exist');
+  return match[1];
+}
+
+function parseRecordedCalls(buffer) {
+  const fields = buffer.toString('utf8').split('\0');
+  assert.equal(fields.pop(), '', 'call log must end with a NUL separator');
+  const calls = [];
+  let cursor = 0;
+  while (cursor < fields.length) {
+    const argumentCount = Number(fields[cursor]);
+    cursor += 1;
+    assert.ok(
+      Number.isSafeInteger(argumentCount) && argumentCount >= 0,
+      'call log argument count must be a non-negative integer',
+    );
+    assert.ok(cursor + argumentCount <= fields.length, 'call log is truncated');
+    calls.push(fields.slice(cursor, cursor + argumentCount));
+    cursor += argumentCount;
+  }
+  return calls;
 }
 
 async function reserveLoopbackPort() {
@@ -282,16 +321,42 @@ test('verify succeeds from a different working directory', async (t) => {
   assert.match(result.stdout, /Syntax checks:\s+\d+ file/);
   assert.match(result.stdout, /Verification complete:/);
   assert.deepEqual(await readdir(workingDirectory), []);
-  const calls = (await readFile(callsPath, 'utf8')).trim().split('\n');
-  assert.equal(calls.filter((call) => call === 'version').length, 1);
-  assert.deepEqual(
-    calls.filter((call) => call.startsWith('tests ')),
-    ['tests fixture 1', 'tests demo 9'],
+  const [verifySource, fixtureFiles, demoFiles, sourceFiles, publicFiles] =
+    await Promise.all([
+      readFile(verifyScript, 'utf8'),
+      readdir(join(demoDirectory, 'fixture', 'test')),
+      readdir(join(demoDirectory, 'tests')),
+      readdir(join(demoDirectory, 'src')),
+      readdir(join(demoDirectory, 'public')),
+    ]);
+  const absoluteFiles = (directory, files, suffix) => files
+    .filter((file) => file.endsWith(suffix))
+    .sort()
+    .map((file) => join(directory, file));
+  const fixtureTestPaths = absoluteFiles(
+    join(demoDirectory, 'fixture', 'test'),
+    fixtureFiles,
+    '.test.mjs',
   );
-  assert.equal(calls.filter((call) => call === 'check').length, 9);
+  const demoTestPaths = absoluteFiles(
+    join(demoDirectory, 'tests'),
+    demoFiles,
+    '.test.mjs',
+  );
+  const syntaxPaths = [
+    ...absoluteFiles(join(demoDirectory, 'src'), sourceFiles, '.mjs'),
+    ...absoluteFiles(join(demoDirectory, 'public'), publicFiles, '.js'),
+  ];
+  const expectedCalls = [
+    ['-e', extractNodeVersionProbe(verifySource)],
+    ['--test', '--test-reporter=tap', ...fixtureTestPaths],
+    ['--test', '--test-reporter=tap', ...demoTestPaths],
+    ...syntaxPaths.map((sourcePath) => ['--check', sourcePath]),
+  ];
+  assert.deepEqual(parseRecordedCalls(await readFile(callsPath)), expectedCalls);
 });
 
-test('verify rejects wrong inventory and every non-passing TAP outcome', async (t) => {
+test('verify rejects process, inventory, and TAP summary failures', async (t) => {
   const passingSummary = {
     tests: 4,
     pass: 4,
@@ -306,9 +371,24 @@ test('verify rejects wrong inventory and every non-passing TAP outcome', async (
     { label: 'cancelled', summary: { ...passingSummary, cancelled: 1 } },
     { label: 'skipped', summary: { ...passingSummary, skipped: 1 } },
     { label: 'todo', summary: { ...passingSummary, todo: 1 } },
+    {
+      label: 'nonzero exit',
+      summary: { ...passingSummary, exitStatus: 7 },
+      expectedError: /Fixture tests exited with status 7/,
+    },
+    {
+      label: 'missing summary',
+      summary: { ...passingSummary, tapMode: 'missing' },
+      expectedError: /Fixture TAP summary is missing or invalid/,
+    },
+    {
+      label: 'malformed summary',
+      summary: { ...passingSummary, tapMode: 'malformed' },
+      expectedError: /Fixture TAP summary is missing or invalid/,
+    },
   ];
 
-  for (const { label, summary } of scenarios) {
+  for (const { label, summary, expectedError } of scenarios) {
     const binaryDirectory = await createTapNode(t, summary);
     const result = runScript(verifyScript, {
       cwd: repositoryDirectory,
@@ -319,7 +399,11 @@ test('verify rejects wrong inventory and every non-passing TAP outcome', async (
 
     assert.equal(result.error, undefined, `${label}: ${result.error?.message}`);
     assert.notEqual(result.status, 0, `${label} unexpectedly succeeded`);
-    assert.match(result.stderr, /TAP summary expected 4 tests and passes/, label);
+    assert.match(
+      result.stderr,
+      expectedError ?? /TAP summary expected 4 tests and passes/,
+      label,
+    );
   }
 });
 
