@@ -1,10 +1,28 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  unlink,
+  writeFile,
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { afterEach, beforeEach, describe, it } from 'node:test'
+import { setImmediate as waitForImmediate } from 'node:timers/promises'
 
 import { JsonStore } from '../src/store.mjs'
+
+const NODE_FILE_SYSTEM = Object.freeze({
+  mkdir,
+  readFile,
+  rename,
+  unlink,
+  writeFile,
+})
 
 function createState(overrides = {}) {
   return {
@@ -13,6 +31,73 @@ function createState(overrides = {}) {
     timeline: [],
     ...overrides,
   }
+}
+
+function createMissingFileBarrier() {
+  let rejectRead
+  const missingRead = new Promise((resolve, reject) => {
+    rejectRead = reject
+  })
+  missingRead.catch(() => {})
+  const files = new Map()
+  const temporaryFiles = new Map()
+  let isFirstRead = true
+
+  return {
+    fileSystem: {
+      async mkdir() {},
+      async readFile(path) {
+        if (isFirstRead) {
+          isFirstRead = false
+          return missingRead
+        }
+        if (!files.has(path)) {
+          throw Object.assign(new Error('missing'), { code: 'ENOENT' })
+        }
+        return files.get(path)
+      },
+      async rename(source, target) {
+        files.set(target, temporaryFiles.get(source))
+        temporaryFiles.delete(source)
+      },
+      async unlink(path) {
+        if (!temporaryFiles.delete(path)) {
+          throw Object.assign(new Error('missing'), { code: 'ENOENT' })
+        }
+      },
+      async writeFile(path, contents) {
+        temporaryFiles.set(path, contents)
+      },
+    },
+    readState(path) {
+      const contents = files.get(path)
+      return contents === undefined ? undefined : JSON.parse(contents)
+    },
+    releaseMissingRead() {
+      rejectRead(Object.assign(new Error('missing'), { code: 'ENOENT' }))
+    },
+  }
+}
+
+async function captureRejection(promise) {
+  let capturedError
+  await assert.rejects(promise, (error) => {
+    capturedError = error
+    return true
+  })
+  return capturedError
+}
+
+function assertStableStoreError(error, targetPath, cause) {
+  assert.equal(error.name, 'StoreError')
+  assert.equal(error.code, 'STORE_ERROR')
+  assert.equal(error.filePath, targetPath)
+  assert.equal(
+    error.message,
+    `Unable to persist demo state at "${targetPath}". Use reset to rebuild the demo state.`,
+  )
+  assert.equal(error.message.includes('known-temp-uuid'), false)
+  assert.equal(error.cause, cause)
 }
 
 describe('JsonStore', () => {
@@ -69,6 +154,97 @@ describe('JsonStore', () => {
       await store.load(),
       createState({ timeline: [{ sequence: 1 }] }),
     )
+  })
+
+  it('serializes a missing-file load followed by save in invocation order', async () => {
+    const barrier = createMissingFileBarrier()
+    const store = new JsonStore({
+      filePath,
+      fileSystem: barrier.fileSystem,
+      initialState: createState(),
+    })
+    const runningState = createState({ phase: 'running' })
+
+    const loadPromise = store.load()
+    const savePromise = store.save(runningState)
+    await waitForImmediate()
+    barrier.releaseMissingRead()
+
+    await Promise.all([loadPromise, savePromise])
+
+    assert.deepEqual(barrier.readState(filePath), runningState)
+    assert.deepEqual(await store.load(), runningState)
+  })
+
+  it('settles invalid saves only after earlier operations finish', async () => {
+    const barrier = createMissingFileBarrier()
+    const store = new JsonStore({
+      filePath,
+      fileSystem: barrier.fileSystem,
+      initialState: createState(),
+    })
+    const settled = []
+
+    const loadPromise = store.load().then(() => settled.push('load'))
+    const invalidSavePromise = store
+      .save(createState({ schemaVersion: 2 }))
+      .catch((error) => {
+        settled.push('invalid-save')
+        return error
+      })
+    await waitForImmediate()
+
+    assert.deepEqual(settled, [])
+
+    barrier.releaseMissingRead()
+    const [, error] = await Promise.all([loadPromise, invalidSavePromise])
+
+    assert.deepEqual(settled, ['load', 'invalid-save'])
+    assert.equal(error instanceof TypeError, true)
+  })
+
+  it('snapshots a save input before waiting for earlier operations', async () => {
+    const barrier = createMissingFileBarrier()
+    const store = new JsonStore({
+      filePath,
+      fileSystem: barrier.fileSystem,
+      initialState: createState(),
+    })
+    const state = createState({ phase: 'running' })
+
+    const loadPromise = store.load()
+    const savePromise = store.save(state)
+    state.phase = 'mutated-after-save-call'
+    await waitForImmediate()
+    barrier.releaseMissingRead()
+
+    await Promise.all([loadPromise, savePromise])
+
+    assert.deepEqual(barrier.readState(filePath), createState({ phase: 'running' }))
+  })
+
+  it('continues processing queued operations after a store failure', async () => {
+    const cause = new Error('first rename fails')
+    let shouldFailRename = true
+    const store = new JsonStore({
+      filePath,
+      fileSystem: {
+        ...NODE_FILE_SYSTEM,
+        async rename(source, target) {
+          if (shouldFailRename) {
+            shouldFailRename = false
+            throw cause
+          }
+          await rename(source, target)
+        },
+      },
+      initialState: createState(),
+    })
+
+    await assert.rejects(store.save(createState({ phase: 'queued' })))
+    await store.save(createState({ phase: 'running' }))
+
+    assert.deepEqual(await store.load(), createState({ phase: 'running' }))
   })
 
   it('rejects a persisted state with an unexpected schema version', async () => {
@@ -176,17 +352,82 @@ describe('JsonStore', () => {
     assert.deepEqual(entries, [basename(filePath)])
   })
 
-  it('cleans up its temporary file when the atomic rename fails', async () => {
-    const blockedFilePath = join(directory, 'blocked-state.json')
-    const store = new JsonStore({
-      filePath: blockedFilePath,
+  it('wraps low-level read, mkdir, and write failures as stable StoreErrors', async () => {
+    for (const operation of ['readFile', 'mkdir', 'writeFile']) {
+      const cause = new Error(`${operation} failed at known-temp-uuid`)
+      const fileSystem = {
+        ...NODE_FILE_SYSTEM,
+        [operation]: async () => {
+          throw cause
+        },
+      }
+      const store = new JsonStore({
+        filePath,
+        fileSystem,
+        initialState: createState(),
+      })
+      const action = operation === 'readFile'
+        ? store.load()
+        : store.save(createState({ phase: 'running' }))
+
+      const error = await captureRejection(action)
+
+      assertStableStoreError(error, filePath, cause)
+    }
+  })
+
+  it('preserves the old state and removes its temp file when rename fails', async () => {
+    const oldState = createState({ phase: 'queued' })
+    const store = new JsonStore({ filePath, initialState: createState() })
+    await store.save(oldState)
+    const cause = new Error('rename failed at known-temp-uuid')
+    const failingStore = new JsonStore({
+      filePath,
+      fileSystem: {
+        ...NODE_FILE_SYSTEM,
+        async rename() {
+          throw cause
+        },
+      },
       initialState: createState(),
     })
-    await mkdir(blockedFilePath)
 
-    await assert.rejects(store.save(createState({ phase: 'running' })))
+    const error = await captureRejection(
+      failingStore.save(createState({ phase: 'running' })),
+    )
 
-    const entries = await readdir(directory)
-    assert.deepEqual(entries, [basename(blockedFilePath)])
+    assertStableStoreError(error, filePath, cause)
+    assert.deepEqual(JSON.parse(await readFile(filePath, 'utf8')), oldState)
+    assert.deepEqual(await readdir(join(directory, 'nested')), [basename(filePath)])
+  })
+
+  it('reports both the atomic write and cleanup errors as the StoreError cause', async () => {
+    const writeError = new Error('rename failed at known-temp-uuid')
+    const cleanupError = new Error('cleanup failed at known-temp-uuid')
+    const store = new JsonStore({
+      filePath,
+      fileSystem: {
+        ...NODE_FILE_SYSTEM,
+        async rename() {
+          throw writeError
+        },
+        async unlink() {
+          throw cleanupError
+        },
+      },
+      initialState: createState(),
+    })
+
+    const error = await captureRejection(
+      store.save(createState({ phase: 'running' })),
+    )
+
+    assert.equal(error.name, 'StoreError')
+    assert.equal(
+      error.message,
+      `Unable to persist demo state at "${filePath}". Use reset to rebuild the demo state.`,
+    )
+    assert.equal(error.cause instanceof AggregateError, true)
+    assert.deepEqual(error.cause.errors, [writeError, cleanupError])
   })
 })

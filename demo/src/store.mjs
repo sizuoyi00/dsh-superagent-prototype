@@ -3,6 +3,14 @@ import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 
+const NODE_FILE_SYSTEM = Object.freeze({
+  mkdir,
+  readFile,
+  rename,
+  unlink,
+  writeFile,
+})
+
 function serializeJsonSafe(value) {
   let serialized
 
@@ -41,16 +49,28 @@ function validateState(state, expectedSchemaVersion) {
   }
 }
 
+export class StoreError extends Error {
+  constructor(filePath, cause) {
+    super(
+      `Unable to persist demo state at "${filePath}". Use reset to rebuild the demo state.`,
+      { cause },
+    )
+    this.name = 'StoreError'
+    this.code = 'STORE_ERROR'
+    this.filePath = filePath
+  }
+}
+
 function createLoadError(filePath, reason, cause) {
   return new Error(
-    `Unable to load state from "${filePath}": ${reason}. Reset the demo to replace this state file.`,
+    `Unable to load state from "${filePath}": ${reason}. Use reset to rebuild the demo state.`,
     { cause },
   )
 }
 
-async function tryUnlink(filePath) {
+async function tryUnlink(fileSystem, filePath) {
   try {
-    await unlink(filePath)
+    await fileSystem.unlink(filePath)
     return undefined
   } catch (error) {
     if (error?.code === 'ENOENT') {
@@ -60,12 +80,18 @@ async function tryUnlink(filePath) {
   }
 }
 
+/**
+ * Persists JSON state with invocation-ordered load/save calls per instance.
+ * Separate JsonStore instances and processes do not coordinate access to a file.
+ */
 export class JsonStore {
   #expectedSchemaVersion
   #filePath
+  #fileSystem
   #initialStateJson
+  #operationQueue = Promise.resolve()
 
-  constructor({ filePath, initialState }) {
+  constructor({ filePath, fileSystem = NODE_FILE_SYSTEM, initialState }) {
     if (typeof filePath !== 'string' || filePath.trim().length === 0) {
       throw new TypeError('filePath must be a non-empty string')
     }
@@ -75,21 +101,26 @@ export class JsonStore {
     validateState(initialStateSnapshot, initialStateSnapshot.schemaVersion)
 
     this.#filePath = filePath
+    this.#fileSystem = Object.freeze({ ...fileSystem })
     this.#expectedSchemaVersion = initialStateSnapshot.schemaVersion
     this.#initialStateJson = initialStateJson
   }
 
-  async load() {
+  load() {
+    return this.#enqueue(() => this.#load())
+  }
+
+  async #load() {
     let contents
 
     try {
-      contents = await readFile(this.#filePath, 'utf8')
+      contents = await this.#fileSystem.readFile(this.#filePath, 'utf8')
     } catch (error) {
       if (error?.code === 'ENOENT') {
         await this.#writeAtomically(this.#initialStateJson)
         return JSON.parse(this.#initialStateJson)
       }
-      throw createLoadError(this.#filePath, error.message, error)
+      throw new StoreError(this.#filePath, error)
     }
 
     let state
@@ -109,20 +140,30 @@ export class JsonStore {
     return state
   }
 
-  async save(state) {
+  save(state) {
     let serialized
+    let validationError
 
     try {
       serialized = serializeJsonSafe(state)
       validateState(state, this.#expectedSchemaVersion)
     } catch (error) {
-      throw new TypeError(
+      validationError = new TypeError(
         `Unable to save state to "${this.#filePath}": ${error.message}`,
         { cause: error },
       )
     }
 
-    await this.#writeAtomically(serialized)
+    if (validationError) {
+      return this.#enqueue(() => Promise.reject(validationError))
+    }
+    return this.#enqueue(() => this.#writeAtomically(serialized))
+  }
+
+  #enqueue(operation) {
+    const result = this.#operationQueue.then(operation)
+    this.#operationQueue = result.catch(() => undefined)
+    return result
   }
 
   async #writeAtomically(serialized) {
@@ -131,31 +172,28 @@ export class JsonStore {
       parentDirectory,
       `.${basename(this.#filePath)}.${randomUUID()}.tmp`,
     )
-    await mkdir(parentDirectory, { recursive: true })
-
     let writeError
     try {
-      await writeFile(temporaryPath, `${serialized}\n`, {
+      await this.#fileSystem.mkdir(parentDirectory, { recursive: true })
+      await this.#fileSystem.writeFile(temporaryPath, `${serialized}\n`, {
         encoding: 'utf8',
         flag: 'wx',
       })
-      await rename(temporaryPath, this.#filePath)
+      // Same-directory rename is process-level atomic replacement. This store
+      // intentionally does not claim fsync durability across a power loss.
+      await this.#fileSystem.rename(temporaryPath, this.#filePath)
+      return
     } catch (error) {
       writeError = error
     }
 
-    const cleanupError = await tryUnlink(temporaryPath)
-    if (writeError && cleanupError) {
-      throw new AggregateError(
+    const cleanupError = await tryUnlink(this.#fileSystem, temporaryPath)
+    const cause = cleanupError
+      ? new AggregateError(
         [writeError, cleanupError],
-        `Unable to save state to "${this.#filePath}" and clean up its temporary file`,
+        'Atomic state write and temporary-file cleanup both failed',
       )
-    }
-    if (writeError) {
-      throw writeError
-    }
-    if (cleanupError) {
-      throw cleanupError
-    }
+      : writeError
+    throw new StoreError(this.#filePath, cause)
   }
 }
