@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { JSDOM } from 'jsdom';
 
 import { createDemoServer } from '../src/server.mjs';
 
@@ -48,6 +49,26 @@ async function createHarness(t) {
   return `http://127.0.0.1:${address.port}`;
 }
 
+async function postJson(baseUrl, pathname) {
+  const response = await fetch(`${baseUrl}${pathname}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}',
+  });
+  assert.equal(response.status, 200, pathname);
+  return response.json();
+}
+
+async function waitFor(predicate, label, timeoutMs = 5_000) {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new Error(`Timed out waiting for ${label}`);
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+  }
+}
+
 test('serves a semantic Chinese control room with every operator region', async (t) => {
   const baseUrl = await createHarness(t);
   const response = await fetch(`${baseUrl}/`);
@@ -71,6 +92,7 @@ test('serves a semantic Chinese control room with every operator region', async 
   assert.match(html, /<section[^>]+id="ticket"/i);
   assert.match(html, /Ticket/);
   assert.match(html, /id="worker-slot"/i);
+  assert.match(html, /id="worker-slot">0 \/ 1</i);
   assert.match(html, /id="ticket-session"/i);
   assert.match(html, /id="ticket-branch"/i);
   assert.match(html, /id="ticket-commits"/i);
@@ -90,6 +112,39 @@ test('serves a semantic Chinese control room with every operator region', async 
   assert.doesNotMatch(html, /<script(?![^>]+src=)[^>]*>/i);
   assert.doesNotMatch(html, /\sstyle="/i);
   assert.doesNotMatch(html, /https?:\/\//i);
+});
+
+test('keeps worker capacity at one slot after two sequential assignments', async (t) => {
+  const baseUrl = await createHarness(t);
+  await postJson(baseUrl, '/api/reset');
+  await postJson(baseUrl, '/api/issue');
+  await postJson(baseUrl, '/api/run');
+  await postJson(baseUrl, '/api/follow-up');
+  const state = await postJson(baseUrl, '/api/run');
+  assert.equal(state.assignments.length, 2);
+
+  const nodeFetch = globalThis.fetch;
+  const dom = await JSDOM.fromURL(`${baseUrl}/`, {
+    resources: 'usable',
+    runScripts: 'dangerously',
+    pretendToBeVisual: true,
+    beforeParse(window) {
+      window.fetch = (input, options) => (
+        nodeFetch(new URL(input, window.location.href), options)
+      );
+    },
+  });
+  try {
+    const phase = dom.window.document.querySelector('#current-phase');
+    const workerSlot = dom.window.document.querySelector('#worker-slot');
+    await waitFor(
+      () => phase.textContent === 'AWAITING / REVIEW',
+      'the rendered review phase',
+    );
+    assert.equal(workerSlot.textContent, '1 / 1');
+  } finally {
+    dom.window.close();
+  }
 });
 
 test('serves all UI assets with strict content types and security headers', async (t) => {

@@ -309,6 +309,7 @@
     const result = latestResult(state);
     const commits = ticket?.commits ?? [];
     const lastAssignment = state?.assignments?.at(-1);
+    const workerSlotOccupied = ticket !== null && ticket.status !== 'ended';
     const ticketStatus = allowedStatus(ticket?.status, TICKET_STATUSES, 'empty');
     const testDataStatus = result?.tests?.ok
       ? 'pass'
@@ -320,9 +321,7 @@
     elements.ticketStatus.textContent = text(ticket?.status, 'NOT CREATED').toUpperCase();
     elements.ticketStatus.dataset.status = ticketStatus;
     elements.ticketId.textContent = text(ticket?.id);
-    elements.workerSlot.textContent = state?.assignments?.length
-      ? `LOCAL · ${String(state.assignments.length).padStart(2, '0')}`
-      : 'LOCAL · 01';
+    elements.workerSlot.textContent = workerSlotOccupied ? '1 / 1' : '0 / 1';
     elements.ticketSession.textContent = text(ticket?.sessionId);
     elements.ticketBranch.textContent = text(ticket?.branch);
     elements.ticketCommits.textContent = String(commits.length);
