@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   cp,
+  link,
   lstat,
   mkdtemp,
   mkdir,
@@ -187,6 +188,28 @@ test('assignment rejects a runtime symlink without changing its external target'
   await symlink(externalFile, join(repositoryDirectory, 'src/discount.mjs'));
 
   await assert.rejects(worker.runAssignment('initial'), /symbolic link/i);
+  assert.equal(await readFile(externalFile, 'utf8'), externalContent);
+});
+
+test('assignment rejects a runtime hard link without changing its external target', async () => {
+  const rootDirectory = await createTemporaryDirectory();
+  const repositoryDirectory = join(rootDirectory, 'runtime repository');
+  const externalFile = join(rootDirectory, 'outside-discount.mjs');
+  const externalContent = await readFile(
+    join(fixtureDirectory, 'src/discount.mjs'),
+    'utf8',
+  );
+  const worker = new GitWorker({
+    fixtureDir: fixtureDirectory,
+    repoDir: repositoryDirectory,
+  });
+  await worker.initialize();
+  await writeFile(externalFile, externalContent, 'utf8');
+  await unlink(join(repositoryDirectory, 'src/discount.mjs'));
+  await link(externalFile, join(repositoryDirectory, 'src/discount.mjs'));
+  assert.equal((await lstat(externalFile)).nlink, 2);
+
+  await assert.rejects(worker.runAssignment('initial'), /hard link/i);
   assert.equal(await readFile(externalFile, 'utf8'), externalContent);
 });
 

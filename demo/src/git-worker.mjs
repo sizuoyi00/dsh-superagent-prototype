@@ -1,13 +1,23 @@
+import { randomUUID } from 'node:crypto';
 import {
   cp,
   lstat,
   mkdir,
+  open,
   readdir,
   readFile,
   realpath,
-  writeFile,
+  rename,
+  unlink,
 } from 'node:fs/promises';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { ProcessError, runProcess } from './process.mjs';
@@ -282,8 +292,7 @@ export class GitWorker {
     const filePath = this.#repositoryPath(relativePath);
     await this.#assertSafeWritePath(filePath);
     const source = await readFile(filePath, 'utf8');
-    await this.#assertSafeWritePath(filePath);
-    await writeFile(filePath, appendSection(source, section), 'utf8');
+    await this.#writeFileAtomically(filePath, appendSection(source, section));
   }
 
   async #replaceInFile(relativePath, original, replacement) {
@@ -291,8 +300,61 @@ export class GitWorker {
     await this.#assertSafeWritePath(filePath);
     const source = await readFile(filePath, 'utf8');
     const updatedSource = replaceOnce(source, original, replacement, relativePath);
-    await this.#assertSafeWritePath(filePath);
-    await writeFile(filePath, updatedSource, 'utf8');
+    await this.#writeFileAtomically(filePath, updatedSource);
+  }
+
+  async #writeFileAtomically(filePath, content) {
+    const targetMetadata = await this.#assertSafeWritePath(filePath);
+    const temporaryPath = resolve(
+      dirname(filePath),
+      `.${basename(filePath)}.${randomUUID()}.tmp`,
+    );
+    let temporaryHandle;
+    let temporaryFileExists = false;
+    let failure;
+
+    try {
+      temporaryHandle = await open(
+        temporaryPath,
+        'wx',
+        targetMetadata.mode & 0o777,
+      );
+      temporaryFileExists = true;
+      await temporaryHandle.writeFile(content, 'utf8');
+      await temporaryHandle.sync();
+      await temporaryHandle.close();
+      temporaryHandle = undefined;
+      await this.#assertSafeWritePath(temporaryPath);
+      await this.#assertSafeWritePath(filePath);
+      await rename(temporaryPath, filePath);
+      temporaryFileExists = false;
+    } catch (cause) {
+      failure = cause;
+    }
+
+    if (temporaryHandle) {
+      try {
+        await temporaryHandle.close();
+      } catch (closeError) {
+        failure = new AggregateError(
+          [failure, closeError].filter(Boolean),
+          'Atomic write and temporary file close both failed',
+        );
+      }
+    }
+    if (temporaryFileExists) {
+      try {
+        await unlink(temporaryPath);
+      } catch (cleanupError) {
+        if (cleanupError.code !== 'ENOENT') {
+          failure = new AggregateError(
+            [failure, cleanupError].filter(Boolean),
+            'Atomic write and temporary file cleanup both failed',
+          );
+        }
+      }
+    }
+    if (failure) throw failure;
   }
 
   async #assertSafeWriteTargets(relativePaths) {
@@ -304,6 +366,14 @@ export class GitWorker {
   }
 
   async #assertSafeWritePath(filePath) {
+    const repositoryMetadata = await lstat(this.#repoDir);
+    if (
+      repositoryMetadata.isSymbolicLink() ||
+      !repositoryMetadata.isDirectory()
+    ) {
+      throw new GitWorkerError('Runtime repository must be a real directory');
+    }
+
     const realRepositoryDirectory = await realpath(this.#repoDir);
     if (realRepositoryDirectory !== this.#repoDir) {
       throw new GitWorkerError('Runtime repository path contains a symbolic link');
@@ -311,7 +381,9 @@ export class GitWorker {
 
     const pathFromRepository = relative(this.#repoDir, filePath);
     let currentPath = this.#repoDir;
-    for (const component of pathFromRepository.split(sep)) {
+    const components = pathFromRepository.split(sep);
+    let targetMetadata;
+    for (const [index, component] of components.entries()) {
       currentPath = resolve(currentPath, component);
       const metadata = await lstat(currentPath);
       if (metadata.isSymbolicLink()) {
@@ -319,12 +391,26 @@ export class GitWorker {
           `Symbolic link is not allowed in runtime repository: ${currentPath}`,
         );
       }
+      const isTarget = index === components.length - 1;
+      if (!isTarget && !metadata.isDirectory()) {
+        throw new GitWorkerError('Runtime write parent must be a directory');
+      }
+      if (isTarget && !metadata.isFile()) {
+        throw new GitWorkerError('Runtime write target must be a regular file');
+      }
+      if (!metadata.isDirectory() && metadata.nlink > 1) {
+        throw new GitWorkerError(
+          `Hard link is not allowed in runtime repository: ${currentPath}`,
+        );
+      }
+      if (isTarget) targetMetadata = metadata;
     }
 
     const realParentDirectory = await realpath(dirname(filePath));
     if (!isWithin(realRepositoryDirectory, realParentDirectory)) {
       throw new GitWorkerError('Runtime write target escapes the repository');
     }
+    return targetMetadata;
   }
 
   #repositoryPath(relativePath) {
