@@ -46,6 +46,7 @@
     'queued', 'running', 'awaiting_review', 'failed', 'ended',
   ]);
   const CHECK_STATUSES = Object.freeze(['ready', 'blocked']);
+  const STATE_POLL_INTERVAL_MS = 1_000;
 
   const elements = Object.freeze({
     main: document.querySelector('main'),
@@ -87,6 +88,9 @@
   let appState = null;
   let doctorState = null;
   let busy = false;
+  let statePollTimer = null;
+  let statePollInFlight = false;
+  let pageActive = true;
 
   function text(value, fallback = '—') {
     if (value === null || value === undefined || value === '') return fallback;
@@ -105,6 +109,18 @@
     return [...(state?.assignments ?? [])]
       .reverse()
       .find((assignment) => assignment?.result)?.result ?? null;
+  }
+
+  function latestFailure(state) {
+    const assignment = state?.assignments?.at(-1);
+    if (assignment?.status !== 'failed') return null;
+    const report = [...(state?.reports ?? [])]
+      .reverse()
+      .find((candidate) => candidate?.state === 'failed' && candidate?.visible);
+    return Object.freeze({
+      code: text(assignment.error?.code, 'ASSIGNMENT_FAILED'),
+      message: text(assignment.error?.message, report?.summary ?? 'Assignment failed'),
+    });
   }
 
   function hasRecovery(state) {
@@ -211,6 +227,13 @@
         success: '失败跟进已排队，可以再次运行 Worker。',
       });
     }
+    if (state.phase === 'running') {
+      return Object.freeze({
+        label: 'Worker 执行中…',
+        description: 'Worker 执行中，自动刷新。',
+        disabled: true,
+      });
+    }
 
     return Object.freeze({
       label: '等待当前操作',
@@ -307,14 +330,19 @@
   function renderTicket(state) {
     const ticket = latestTicket(state);
     const result = latestResult(state);
+    const failure = latestFailure(state);
     const commits = ticket?.commits ?? [];
     const lastAssignment = state?.assignments?.at(-1);
     const workerSlotOccupied = ticket !== null && ticket.status !== 'ended';
     const ticketStatus = allowedStatus(ticket?.status, TICKET_STATUSES, 'empty');
-    const testDataStatus = result?.tests?.ok
+    const testDataStatus = failure
+      ? 'failed'
+      : result?.tests?.ok
       ? 'pass'
       : lastAssignment?.status === 'failed' ? 'failed' : 'waiting';
-    const testStatus = result?.tests?.ok
+    const testStatus = failure
+      ? `FAIL · [${failure.code}] ${failure.message}`
+      : result?.tests?.ok
       ? `PASS · ${text(result.tests.command, 'TEST')}`
       : lastAssignment?.status === 'failed' ? 'FAILED' : 'WAITING';
 
@@ -376,6 +404,13 @@
   }
 
   function renderPatch(state) {
+    const failure = latestFailure(state);
+    if (failure) {
+      elements.patchOutput.textContent =
+        `# 最新 assignment 失败；上一版本 patch 已隐藏，避免误作当前证据。\n# [${failure.code}] ${failure.message}`;
+      elements.patchMeta.textContent = 'FAILED · PREVIOUS PATCH HIDDEN';
+      return;
+    }
     const result = latestResult(state);
     const patch = result?.patch ?? '';
     const files = result?.files ?? [];
@@ -417,12 +452,62 @@
     elements.doctorBlockers.replaceChildren(...blockerItems);
   }
 
+  function renderDoctorUnavailable(error) {
+    elements.doctorStatus.textContent = 'UNAVAILABLE';
+    elements.doctorStatus.dataset.ready = 'false';
+    elements.doctorChecks.replaceChildren(
+      createListItem('Doctor 暂时不可用', '本地 lifecycle state 不受影响。'),
+    );
+    elements.doctorBlockers.replaceChildren(
+      createListItem(formatError(error)),
+    );
+  }
+
   function renderState(state) {
     renderGuided(state);
     renderPipeline(state);
     renderTicket(state);
     renderTimeline(state);
     renderPatch(state);
+  }
+
+  function stopStatePolling() {
+    if (statePollTimer === null) return;
+    window.clearTimeout(statePollTimer);
+    statePollTimer = null;
+  }
+
+  function shouldPollState() {
+    return pageActive && appState?.phase === 'running' && document.hidden !== true;
+  }
+
+  function synchronizeStatePolling() {
+    if (!shouldPollState()) {
+      stopStatePolling();
+      return;
+    }
+    if (statePollTimer !== null || statePollInFlight) return;
+    statePollTimer = window.setTimeout(pollRunningState, STATE_POLL_INTERVAL_MS);
+  }
+
+  function applyState(nextState) {
+    appState = nextState;
+    renderState(appState);
+    synchronizeStatePolling();
+  }
+
+  async function pollRunningState() {
+    statePollTimer = null;
+    if (!shouldPollState() || statePollInFlight) return;
+    statePollInFlight = true;
+    try {
+      applyState(await requestJson(ROUTES.state));
+    } catch (error) {
+      setOperationStatus(formatError(error), 'error');
+    } finally {
+      statePollInFlight = false;
+      synchronizeStatePolling();
+    }
   }
 
   function setBusy(nextBusy) {
@@ -434,14 +519,21 @@
   }
 
   async function refreshAll() {
-    const [nextState, nextDoctor] = await Promise.all([
+    const [stateResult, doctorResult] = await Promise.allSettled([
       requestJson(ROUTES.state),
       requestJson(ROUTES.doctor),
     ]);
-    appState = nextState;
-    doctorState = nextDoctor;
-    renderState(appState);
-    renderDoctor(doctorState);
+    if (stateResult.status === 'fulfilled') {
+      applyState(stateResult.value);
+    }
+    if (doctorResult.status === 'fulfilled') {
+      doctorState = doctorResult.value;
+      renderDoctor(doctorState);
+    } else {
+      doctorState = null;
+      renderDoctorUnavailable(doctorResult.reason);
+    }
+    if (stateResult.status === 'rejected') throw stateResult.reason;
   }
 
   async function performOperation(operation, successMessage) {
@@ -477,11 +569,18 @@
   }
 
   async function refreshDoctor() {
-    await performOperation(async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
       const nextDoctor = await requestJson(ROUTES.doctor);
       doctorState = nextDoctor;
       renderDoctor(doctorState);
-    }, 'Doctor 已刷新；检查过程不会修改本机配置。');
+    } catch (error) {
+      doctorState = null;
+      renderDoctorUnavailable(error);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function resetDemo() {
@@ -501,6 +600,14 @@
   elements.guidedButton.addEventListener('click', runGuidedAction);
   elements.doctorButton.addEventListener('click', refreshDoctor);
   elements.resetButton.addEventListener('click', resetDemo);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopStatePolling();
+    else synchronizeStatePolling();
+  });
+  window.addEventListener('pagehide', () => {
+    pageActive = false;
+    stopStatePolling();
+  });
 
   async function initialize() {
     setBusy(true);

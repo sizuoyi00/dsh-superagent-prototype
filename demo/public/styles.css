@@ -302,7 +302,7 @@ main[aria-busy="true"] {
   display: none;
 }
 .pipeline__index {
-  align-self: start; color: var(--color-line-strong);
+  align-self: start; color: var(--color-text-soft);
   font-family: var(--font-mono); font-size: 0.65rem;
   letter-spacing: 0.08em;
 }
@@ -411,6 +411,9 @@ main[aria-busy="true"] {
 }
 .timeline-list {
   max-height: 28rem; overflow-y: auto;
+}
+.timeline-list:focus-visible {
+  outline: 3px solid var(--color-signal-cyan); outline-offset: -3px;
 }
 .timeline-list li {
   display: grid; grid-template-columns: 2.7rem minmax(0, 1fr);

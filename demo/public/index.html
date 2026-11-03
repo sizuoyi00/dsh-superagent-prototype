@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
     <title>SuperAgent 本地任务控制室</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/styles.css">
     <script src="/app.js" defer></script>
   </head>
@@ -161,7 +162,13 @@
             </div>
             <span id="timeline-count" class="counter">00 EVENTS</span>
           </header>
-          <ol id="timeline-list" class="timeline-list" aria-label="生命周期事件">
+          <ol
+            id="timeline-list"
+            class="timeline-list"
+            tabindex="0"
+            role="region"
+            aria-label="生命周期事件，可上下滚动"
+          >
             <li class="timeline-list__empty">等待第一个事件</li>
           </ol>
         </section>
