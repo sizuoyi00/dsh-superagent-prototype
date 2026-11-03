@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { constants } from 'node:fs';
 import { lstat, mkdir, open, readFile, readdir, realpath } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 
@@ -16,6 +17,22 @@ const GLOBAL_CONFIG = `[commit]
 [core]
 \tfsmonitor = false
 \thooksPath =
+`;
+
+const LOCAL_CONFIG = `[core]
+\trepositoryformatversion = 0
+\tfilemode = false
+\tbare = false
+\tlogallrefupdates = true
+\tfsmonitor = false
+\thooksPath =
+[user]
+\tname = SuperAgent Demo
+\temail = superagent-demo@example.invalid
+[commit]
+\tgpgSign = false
+[tag]
+\tgpgSign = false
 `;
 
 class GitSafetyError extends Error {
@@ -174,4 +191,47 @@ export async function assertGitSafety(repositoryDirectory, expectedIdentities) {
   if (currentIdentities.length !== expectedIdentities.length) {
     throw new GitSafetyError('Git safety identity count changed');
   }
+}
+
+function assertIdentityContent(identity, expectedContent, label) {
+  const content = Buffer.from(identity.content, 'base64').toString('utf8');
+  if (content !== expectedContent) {
+    throw new GitSafetyError(`${label} does not contain the fixed safe configuration`);
+  }
+}
+
+function assertHandleIdentity(identity, metadata) {
+  if (
+    identity.device !== metadata.dev ||
+    identity.inode !== metadata.ino ||
+    metadata.nlink !== 1 ||
+    !metadata.isFile()
+  ) {
+    throw new GitSafetyError('Local Git config identity changed before replacement');
+  }
+}
+
+export async function prepareGitSafetyForResume(repositoryDirectory) {
+  const before = await captureGitSafety(repositoryDirectory);
+  assertIdentityContent(before.at(-1), GLOBAL_CONFIG, 'Controlled global Git config');
+  const localConfigIdentity = before[2];
+  const flags = constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0);
+  let configHandle;
+  try {
+    configHandle = await open(localConfigIdentity.path, flags);
+    assertHandleIdentity(localConfigIdentity, await configHandle.stat());
+    await configHandle.truncate(0);
+    await configHandle.writeFile(LOCAL_CONFIG, 'utf8');
+    await configHandle.sync();
+    assertHandleIdentity(localConfigIdentity, await configHandle.stat());
+  } catch (cause) {
+    if (cause instanceof GitSafetyError) throw cause;
+    throw new GitSafetyError('Unable to establish the fixed local Git config', { cause });
+  } finally {
+    await configHandle?.close();
+  }
+  const identities = await captureGitSafety(repositoryDirectory);
+  assertIdentityContent(identities[2], LOCAL_CONFIG, 'Local Git config');
+  assertIdentityContent(identities.at(-1), GLOBAL_CONFIG, 'Controlled global Git config');
+  return identities;
 }

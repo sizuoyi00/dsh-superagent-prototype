@@ -58,6 +58,10 @@ class RuntimeIntegrityError extends RequestError {
   }
 }
 
+class PublicIntegrityError extends RequestError {
+  constructor() { super(409, 'PUBLIC_INTEGRITY_ERROR', 'Public directory identity changed; restart the demo safely'); this.name = 'PublicIntegrityError'; }
+}
+
 class StoreAccessError extends RequestError {
   constructor(operation) {
     super(500, 'STORE_ERROR', `Unable to ${operation} demo state. Use reset to rebuild the demo state.`);
@@ -103,23 +107,25 @@ function isWithin(parentDirectory, candidatePath) {
   );
 }
 
-function readRuntimeIdentity(runtimeDir) {
+function readDirectoryIdentity(directoryPath, IntegrityError) {
   let metadata;
   let realPath;
-  try {
-    metadata = lstatSync(runtimeDir);
-    realPath = realpathSync(runtimeDir);
-  } catch {
-    throw new RuntimeIntegrityError();
-  }
-  if (
-    metadata.isSymbolicLink() ||
-    !metadata.isDirectory() ||
-    realPath !== runtimeDir
-  ) {
-    throw new RuntimeIntegrityError();
+  try { metadata = lstatSync(directoryPath); realPath = realpathSync(directoryPath); }
+  catch { throw new IntegrityError(); }
+  if (metadata.isSymbolicLink() || !metadata.isDirectory() || realPath !== directoryPath) {
+    throw new IntegrityError();
   }
   return Object.freeze({ dev: metadata.dev, ino: metadata.ino, nlink: metadata.nlink, realPath });
+}
+
+function verifyDirectoryIdentity(directoryPath, identity, IntegrityError, verifyLinkCount = true) {
+  const candidate = readDirectoryIdentity(directoryPath, IntegrityError);
+  if (
+    candidate.dev !== identity.dev || candidate.ino !== identity.ino ||
+    (verifyLinkCount && candidate.nlink !== identity.nlink) ||
+    candidate.realPath !== identity.realPath
+  ) throw new IntegrityError();
+  return candidate;
 }
 
 function initializeRuntimeDirectory(runtimeDir) {
@@ -141,30 +147,10 @@ function initializeRuntimeDirectory(runtimeDir) {
     }
   }
 
-  let identity = readRuntimeIdentity(runtimeDir);
+  let identity = readDirectoryIdentity(runtimeDir, RuntimeIntegrityError);
   return Object.freeze({
-    refreshAfterControlledDirectoryChange() {
-      const candidate = readRuntimeIdentity(runtimeDir);
-      if (
-        candidate.dev !== identity.dev ||
-        candidate.ino !== identity.ino ||
-        candidate.realPath !== identity.realPath
-      ) {
-        throw new RuntimeIntegrityError();
-      }
-      identity = candidate;
-    },
-    verify() {
-      const candidate = readRuntimeIdentity(runtimeDir);
-      if (
-        candidate.dev !== identity.dev ||
-        candidate.ino !== identity.ino ||
-        candidate.nlink !== identity.nlink ||
-        candidate.realPath !== identity.realPath
-      ) {
-        throw new RuntimeIntegrityError();
-      }
-    },
+    refreshAfterControlledDirectoryChange() { identity = verifyDirectoryIdentity(runtimeDir, identity, RuntimeIntegrityError, false); },
+    verify() { verifyDirectoryIdentity(runtimeDir, identity, RuntimeIntegrityError); },
   });
 }
 
@@ -502,17 +488,13 @@ function sendRequestError(response, error) {
   });
 }
 
-export function createDemoServer({
-  runtimeDir,
-  publicDir,
-  fixtureDir,
-  doctor = checkLiveReadiness,
-}) {
+export function createDemoServer({ runtimeDir, publicDir, fixtureDir, doctor = checkLiveReadiness }) {
   if (typeof doctor !== 'function') {
     throw new TypeError('doctor must be a function');
   }
   const directories = validateDirectoryLayout(runtimeDir, publicDir, fixtureDir);
   const runtimeGuard = initializeRuntimeDirectory(directories.runtimeDir);
+  const publicIdentity = readDirectoryIdentity(directories.publicDir, PublicIntegrityError);
   const initialState = createState();
   const stateFilePath = join(directories.runtimeDir, 'state.json');
   const store = new JsonStore({ filePath: stateFilePath, initialState });
@@ -520,6 +502,8 @@ export function createDemoServer({
   let currentState;
   let runInProgress = false;
   let worker;
+
+  function createWorker() { return new GitWorker({ fixtureDir: directories.fixtureDir, repoDir }); }
 
   async function readStateFileMetadata(operation) {
     try { return await lstat(stateFilePath); } catch (error) {
@@ -612,13 +596,23 @@ export function createDemoServer({
   async function resetDemo() {
     await removeUnsafeStateEntryForReset();
     await prepareRuntimeRepository();
-    const nextWorker = new GitWorker({ fixtureDir: directories.fixtureDir, repoDir });
+    const nextWorker = createWorker();
     runtimeGuard.verify();
     await nextWorker.initialize();
     runtimeGuard.refreshAfterControlledDirectoryChange();
     const resetState = await saveState(createState());
     worker = nextWorker;
     return resetState;
+  }
+
+  async function resumeWorker(state) {
+    const ticket = state.tickets.at(-1);
+    if (!ticket) return;
+    const nextWorker = createWorker();
+    runtimeGuard.verify();
+    await nextWorker.resume({ commits: ticket.commits });
+    runtimeGuard.verify();
+    worker = nextWorker;
   }
 
   async function receiveDemoIssue(body) {
@@ -631,6 +625,8 @@ export function createDemoServer({
   }
 
   async function executeDemoAssignment() {
+    const state = await getState();
+    if (!worker) await resumeWorker(state);
     if (!worker) {
       throw new RequestError(
         409,
@@ -638,9 +634,9 @@ export function createDemoServer({
         'Reset the demo before running an assignment',
       );
     }
-    const runningState = await saveState(startAssignment(await getState()));
-    const assignment = runningState.assignments.at(-1);
-    const workerPhase = assignment.kind === 'initial' ? 'initial' : 'follow-up';
+    const runningState = await saveState(startAssignment(state));
+    const workerPhase = runningState.tickets.at(-1).commits.length === 0
+      ? 'initial' : 'follow-up';
     let workerResult;
     try {
       runtimeGuard.verify();
@@ -692,6 +688,7 @@ export function createDemoServer({
 
   async function recoverDemo() {
     const persistedState = await loadState();
+    if (!worker) await resumeWorker(persistedState);
     return saveState(recoverState(persistedState));
   }
 
@@ -759,6 +756,7 @@ export function createDemoServer({
         await handleApi(request, response, pathname);
         return;
       }
+      verifyDirectoryIdentity(directories.publicDir, publicIdentity, PublicIntegrityError);
       await serveStatic(request, response, directories.publicDir, pathname);
     } catch (error) {
       if (!response.headersSent) sendRequestError(response, error);

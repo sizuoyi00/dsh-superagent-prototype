@@ -6,6 +6,7 @@ import {
   lstat,
   readFile,
   readdir,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -678,6 +679,47 @@ test('serves local static files but rejects methods and path traversal', async (
   assert.equal(symlinkEscape.status, 404);
   assert.equal(unknown.status, 404);
 });
+
+test('rejects a symbolic-link public directory during construction', async (t) => {
+  const rootDirectory = await mkdtemp(join(tmpdir(), 'superagent-public-'));
+  const externalDirectory = join(rootDirectory, 'external');
+  const publicDir = join(rootDirectory, 'public');
+  await mkdir(externalDirectory);
+  await symlink(externalDirectory, publicDir);
+  t.after(() => rm(rootDirectory, { recursive: true, force: true }));
+
+  assert.throws(
+    () => createDemoServer({
+      runtimeDir: join(rootDirectory, 'runtime'),
+      publicDir,
+      fixtureDir: fixtureDirectory,
+    }),
+    (error) => error?.code === 'PUBLIC_INTEGRITY_ERROR',
+  );
+});
+
+for (const replacement of ['symbolic link', 'new directory']) {
+  test(`rejects a ${replacement} replacement for publicDir`, async (t) => {
+    const harness = await createHarness(t);
+    const originalDirectory = join(harness.rootDirectory, 'original-public');
+    const externalDirectory = join(harness.rootDirectory, 'external-public');
+    await mkdir(externalDirectory);
+    await writeFile(join(externalDirectory, 'asset.txt'), 'external secret\n');
+    await rename(harness.publicDir, originalDirectory);
+    if (replacement === 'symbolic link') {
+      await symlink(externalDirectory, harness.publicDir);
+    } else {
+      await rename(externalDirectory, harness.publicDir);
+    }
+
+    const response = await fetch(`${harness.baseUrl}/asset.txt`);
+    const body = await response.text();
+
+    assert.equal(response.status, 409);
+    assert.equal(JSON.parse(body).code, 'PUBLIC_INTEGRITY_ERROR');
+    assert.equal(body.includes('external secret'), false);
+  });
+}
 
 test('rejects dangerous nesting between runtime, public, and fixture paths', async (t) => {
   const rootDirectory = await mkdtemp(join(tmpdir(), 'superagent-layout-'));

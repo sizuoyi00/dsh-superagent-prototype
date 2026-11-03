@@ -1,36 +1,21 @@
 import { randomUUID } from 'node:crypto';
 import {
-  cp,
-  lstat,
-  mkdtemp,
-  open,
-  readdir,
-  readFile,
-  realpath,
-  rename,
-  rm,
-  unlink,
+  cp, lstat, mkdtemp, open, readdir, readFile, realpath, rename, rm, unlink,
 } from 'node:fs/promises';
-import {
-  basename,
-  dirname,
-  isAbsolute,
-  parse,
-  relative,
-  resolve,
-  sep,
-} from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
-  assertGitSafety,
-  captureGitSafety,
-  createGitControlDirectory,
-  SAFE_GIT_CONFIG_ENTRIES,
+  assertGitSafety, captureGitSafety, createGitControlDirectory,
+  prepareGitSafetyForResume, SAFE_GIT_CONFIG_ENTRIES,
 } from './git-safety.mjs';
+import {
+  ASSIGNMENT_BRANCH, assertTreeHasNoSymbolicLinks, assertTrustedDirectoryPath,
+  GitRecoveryError, restoreGitRepository, validateRecoveryCommits,
+} from './git-recovery.mjs';
 import { ProcessError, runProcess } from './process.mjs';
 
-export const ASSIGNMENT_BRANCH = 'agent/demo-discount-boundary';
+export { ASSIGNMENT_BRANCH };
 
 const INITIAL_COMMIT_MESSAGE = 'chore: initialize discount fixture';
 const FIRST_COMMIT_MESSAGE = 'fix: support 100 percent discounts';
@@ -151,38 +136,6 @@ function sanitizeResult(value, privatePath, replacement = '<repo>') {
   return value;
 }
 
-async function assertTreeHasNoSymbolicLinks(treePath) {
-  const metadata = await lstat(treePath);
-  if (metadata.isSymbolicLink()) {
-    throw new GitWorkerError(`Symbolic link is not allowed: ${treePath}`);
-  }
-  if (!metadata.isDirectory()) return;
-
-  const entries = await readdir(treePath);
-  await Promise.all(
-    entries.map((entry) =>
-      assertTreeHasNoSymbolicLinks(resolve(treePath, entry)),
-    ),
-  );
-}
-
-async function assertTrustedDirectoryPath(directoryPath) {
-  const { root } = parse(directoryPath);
-  const components = relative(root, directoryPath).split(sep).filter(Boolean);
-  let currentPath = root;
-
-  for (const component of components) {
-    currentPath = resolve(currentPath, component);
-    const metadata = await lstat(currentPath);
-    if (metadata.isSymbolicLink()) {
-      throw new GitWorkerError('Repository parent contains a symbolic link');
-    }
-    if (!metadata.isDirectory()) {
-      throw new GitWorkerError('Repository parent must contain only directories');
-    }
-  }
-}
-
 export class GitWorker {
   #fixtureDir;
   #repoDir;
@@ -297,6 +250,38 @@ export class GitWorker {
         cause,
         stagingDirectory ? [stagingDirectory] : [],
       );
+    }
+  }
+
+  async resume(options) {
+    if (this.#stage !== 'uninitialized') {
+      throw new GitWorkerError('Git worker has already been initialized');
+    }
+    let hashes;
+    try {
+      hashes = validateRecoveryCommits(options);
+    } catch (cause) {
+      throw new GitWorkerError(cause.message, { cause });
+    }
+    this.#stage = 'resuming';
+    try {
+      await assertTrustedDirectoryPath(dirname(this.#repoDir));
+      this.#gitIdentity = await prepareGitSafetyForResume(this.#repoDir);
+      const resumed = await restoreGitRepository({
+        hashes,
+        git: (args) => this.#git(args),
+      });
+      this.#initialCommit = resumed.initialCommit;
+      this.#stage = resumed.stage;
+      return resumed;
+    } catch (error) {
+      this.#gitIdentity = undefined;
+      this.#initialCommit = undefined;
+      this.#stage = 'uninitialized';
+      const cause = error instanceof GitRecoveryError
+        ? new GitWorkerError(error.message, { cause: error })
+        : error;
+      throw this.#wrapError('Failed to resume the runtime repository', cause);
     }
   }
 
@@ -757,6 +742,7 @@ export class GitWorker {
         : {}),
     };
     const isolatedArgs = [
+      '--no-replace-objects',
       '-c',
       `core.hooksPath=${resolve(controlDirectory, 'hooks')}`,
       ...args,
@@ -788,6 +774,9 @@ export class GitWorker {
       const publicMessage = sanitizePublicText(cause.message);
       if (publicMessage === cause.message) return cause;
       return new GitWorkerError(publicMessage, { cause });
+    }
+    if (cause instanceof GitRecoveryError) {
+      return new GitWorkerError(sanitizePublicText(cause.message), { cause });
     }
     if (cause instanceof ProcessError && cause.result) {
       const detail = sanitizePublicText(combineOutput(cause.result));
