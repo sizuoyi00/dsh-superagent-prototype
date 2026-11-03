@@ -1,40 +1,15 @@
-import {
-  existsSync,
-  realpathSync,
-} from 'node:fs';
-import {
-  lstat,
-  mkdir,
-  readFile,
-  realpath,
-  rm,
-  stat,
-  unlink,
-} from 'node:fs/promises';
+import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
+import { lstat, readFile, realpath, rm, stat, unlink } from 'node:fs/promises';
 import { Server } from 'node:http';
 import {
-  basename,
-  dirname,
-  extname,
-  isAbsolute,
-  join,
-  relative,
-  resolve,
-  sep,
+  basename, dirname, extname, isAbsolute, join,
+  parse, relative, resolve, sep,
 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  completeAssignment,
-  ConflictError,
-  createState,
-  failAssignment,
-  mergeTicket,
-  receiveFollowUp,
-  receiveIssue,
-  recoverState,
-  startAssignment,
-  ValidationError,
+  completeAssignment, ConflictError, createState, failAssignment, mergeTicket,
+  receiveFollowUp, receiveIssue, recoverState, startAssignment, ValidationError,
 } from './domain.mjs';
 import { checkLiveReadiness } from './doctor.mjs';
 import { GitWorker } from './git-worker.mjs';
@@ -76,6 +51,20 @@ class RequestError extends Error {
   }
 }
 
+class RuntimeIntegrityError extends RequestError {
+  constructor() {
+    super(409, 'RUNTIME_INTEGRITY_ERROR', 'Runtime directory identity changed; restart the demo safely');
+    this.name = 'RuntimeIntegrityError';
+  }
+}
+
+class StoreAccessError extends RequestError {
+  constructor(operation) {
+    super(500, 'STORE_ERROR', `Unable to ${operation} demo state. Use reset to rebuild the demo state.`);
+    this.name = 'StoreAccessError';
+  }
+}
+
 class LoopbackServer extends Server {
   listen(...args) {
     const [target, possibleHost] = args;
@@ -112,6 +101,71 @@ function isWithin(parentDirectory, candidatePath) {
       pathFromParent !== '..' &&
       !isAbsolute(pathFromParent))
   );
+}
+
+function readRuntimeIdentity(runtimeDir) {
+  let metadata;
+  let realPath;
+  try {
+    metadata = lstatSync(runtimeDir);
+    realPath = realpathSync(runtimeDir);
+  } catch {
+    throw new RuntimeIntegrityError();
+  }
+  if (
+    metadata.isSymbolicLink() ||
+    !metadata.isDirectory() ||
+    realPath !== runtimeDir
+  ) {
+    throw new RuntimeIntegrityError();
+  }
+  return Object.freeze({ dev: metadata.dev, ino: metadata.ino, nlink: metadata.nlink, realPath });
+}
+
+function initializeRuntimeDirectory(runtimeDir) {
+  const { root } = parse(runtimeDir);
+  const components = relative(root, runtimeDir).split(sep).filter(Boolean);
+  let currentPath = root;
+
+  for (const component of components) {
+    currentPath = resolve(currentPath, component);
+    try {
+      if (!existsSync(currentPath)) mkdirSync(currentPath);
+      const metadata = lstatSync(currentPath);
+      if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+        throw new RuntimeIntegrityError();
+      }
+    } catch (error) {
+      if (error instanceof RuntimeIntegrityError) throw error;
+      throw new RuntimeIntegrityError();
+    }
+  }
+
+  let identity = readRuntimeIdentity(runtimeDir);
+  return Object.freeze({
+    refreshAfterControlledDirectoryChange() {
+      const candidate = readRuntimeIdentity(runtimeDir);
+      if (
+        candidate.dev !== identity.dev ||
+        candidate.ino !== identity.ino ||
+        candidate.realPath !== identity.realPath
+      ) {
+        throw new RuntimeIntegrityError();
+      }
+      identity = candidate;
+    },
+    verify() {
+      const candidate = readRuntimeIdentity(runtimeDir);
+      if (
+        candidate.dev !== identity.dev ||
+        candidate.ino !== identity.ino ||
+        candidate.nlink !== identity.nlink ||
+        candidate.realPath !== identity.realPath
+      ) {
+        throw new RuntimeIntegrityError();
+      }
+    },
+  });
 }
 
 function canonicalizeProspectivePath(directoryPath) {
@@ -458,9 +512,11 @@ export function createDemoServer({
     throw new TypeError('doctor must be a function');
   }
   const directories = validateDirectoryLayout(runtimeDir, publicDir, fixtureDir);
+  const runtimeGuard = initializeRuntimeDirectory(directories.runtimeDir);
   const initialState = createState();
+  const stateFilePath = join(directories.runtimeDir, 'state.json');
   const store = new JsonStore({
-    filePath: join(directories.runtimeDir, 'state.json'),
+    filePath: stateFilePath,
     initialState,
   });
   const repoDir = join(directories.runtimeDir, 'repo');
@@ -468,25 +524,68 @@ export function createDemoServer({
   let runInProgress = false;
   let worker;
 
+  async function assertSafeStateFile(operation) {
+    try {
+      const metadata = await lstat(stateFilePath);
+      if (
+        metadata.isSymbolicLink() ||
+        !metadata.isFile() ||
+        metadata.nlink !== 1
+      ) {
+        throw new StoreAccessError(operation);
+      }
+    } catch (error) {
+      if (error?.code === 'ENOENT') return;
+      if (error instanceof StoreAccessError) throw error;
+      throw new StoreAccessError(operation);
+    }
+  }
+
+  async function loadState() {
+    runtimeGuard.verify();
+    await assertSafeStateFile('load');
+    runtimeGuard.verify();
+    let loadedState;
+    try {
+      loadedState = await store.load();
+    } catch {
+      runtimeGuard.verify();
+      throw new StoreAccessError('load');
+    }
+    runtimeGuard.verify();
+    return loadedState;
+  }
+
+  async function persistState(nextState) {
+    runtimeGuard.verify();
+    await assertSafeStateFile('persist');
+    runtimeGuard.verify();
+    try {
+      await store.save(nextState);
+    } catch {
+      runtimeGuard.verify();
+      throw new StoreAccessError('persist');
+    }
+    runtimeGuard.verify();
+  }
+
   async function getState() {
-    if (currentState === undefined) currentState = await store.load();
+    runtimeGuard.verify();
+    if (currentState === undefined) {
+      currentState = await loadState();
+    }
     return currentState;
   }
 
   async function saveState(nextState) {
-    await store.save(nextState);
+    await persistState(nextState);
     currentState = nextState;
     return nextState;
   }
 
   async function prepareRuntimeRepository() {
-    await mkdir(directories.runtimeDir, { recursive: true });
-    const runtimeMetadata = await lstat(directories.runtimeDir);
-    const realRuntimeDirectory = await realpath(directories.runtimeDir);
+    runtimeGuard.verify();
     if (
-      runtimeMetadata.isSymbolicLink() ||
-      !runtimeMetadata.isDirectory() ||
-      realRuntimeDirectory !== directories.runtimeDir ||
       dirname(repoDir) !== directories.runtimeDir ||
       !isWithin(directories.runtimeDir, repoDir) ||
       repoDir === directories.runtimeDir
@@ -505,6 +604,7 @@ export function createDemoServer({
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error;
     }
+    runtimeGuard.refreshAfterControlledDirectoryChange();
   }
 
   async function resetDemo() {
@@ -513,7 +613,9 @@ export function createDemoServer({
       fixtureDir: directories.fixtureDir,
       repoDir,
     });
+    runtimeGuard.verify();
     await nextWorker.initialize();
+    runtimeGuard.refreshAfterControlledDirectoryChange();
     const resetState = await saveState(createState());
     worker = nextWorker;
     return resetState;
@@ -541,8 +643,11 @@ export function createDemoServer({
     const workerPhase = assignment.kind === 'initial' ? 'initial' : 'follow-up';
     let workerResult;
     try {
+      runtimeGuard.verify();
       workerResult = await worker.runAssignment(workerPhase);
+      runtimeGuard.verify();
     } catch {
+      runtimeGuard.verify();
       const publicFailure = Object.freeze({
         name: 'AssignmentError',
         message: 'The local worker could not complete the assignment',
@@ -586,7 +691,7 @@ export function createDemoServer({
   }
 
   async function recoverDemo() {
-    const persistedState = await store.load();
+    const persistedState = await loadState();
     return saveState(recoverState(persistedState));
   }
 
@@ -670,12 +775,19 @@ function parseDemoPort(value) {
   return port;
 }
 
+function resolveDemoRuntimeDirectory(demoDirectory, configuredDirectory) {
+  if (configuredDirectory === undefined) return resolve(demoDirectory, '.runtime');
+  if (configuredDirectory.trim().length === 0) throw new TypeError('DEMO_RUNTIME_DIR must be a non-empty path');
+  return resolve(configuredDirectory);
+}
+
 const modulePath = fileURLToPath(import.meta.url);
 if (process.argv[1] && resolve(process.argv[1]) === modulePath) {
   const demoDirectory = resolve(dirname(modulePath), '..');
   const server = createDemoServer({
-    runtimeDir: resolve(
-      process.env.DEMO_RUNTIME_DIR ?? join(demoDirectory, '.runtime'),
+    runtimeDir: resolveDemoRuntimeDirectory(
+      demoDirectory,
+      process.env.DEMO_RUNTIME_DIR,
     ),
     publicDir: resolve(demoDirectory, 'public'),
     fixtureDir: resolve(demoDirectory, 'fixture'),

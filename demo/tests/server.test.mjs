@@ -4,6 +4,7 @@ import {
   mkdtemp,
   lstat,
   readFile,
+  readdir,
   rm,
   symlink,
   writeFile,
@@ -15,9 +16,11 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { createDemoServer } from '../src/server.mjs';
+import { runProcess } from '../src/process.mjs';
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const fixtureDirectory = resolve(testDirectory, '../fixture');
+const serverModulePath = resolve(testDirectory, '../src/server.mjs');
 
 async function closeServer(server) {
   if (!server.listening) return;
@@ -144,6 +147,29 @@ test('defaults server.listen to loopback and rejects non-loopback binding', asyn
     () => server.listen(0, '0.0.0.0'),
     /loopback/i,
   );
+});
+
+test('CLI rejects a blank DEMO_RUNTIME_DIR without writing into cwd', async (t) => {
+  const workingDirectory = await mkdtemp(join(tmpdir(), 'superagent-cli-'));
+  const sentinelPath = join(workingDirectory, 'sentinel.txt');
+  await writeFile(sentinelPath, 'unchanged\n', 'utf8');
+  t.after(() => rm(workingDirectory, { recursive: true, force: true }));
+
+  const result = await runProcess(process.execPath, [serverModulePath], {
+    cwd: workingDirectory,
+    env: {
+      ...process.env,
+      DEMO_RUNTIME_DIR: '   ',
+    },
+    timeoutMs: 750,
+    maxOutputBytes: 16 * 1024,
+  });
+
+  assert.equal(result.timedOut, false);
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /DEMO_RUNTIME_DIR/);
+  assert.deepEqual(await readdir(workingDirectory), ['sentinel.txt']);
+  assert.equal(await readFile(sentinelPath, 'utf8'), 'unchanged\n');
 });
 
 test('returns the injected live-readiness doctor result', async (t) => {
@@ -325,6 +351,28 @@ test('reset replaces only runtimeDir/repo and never follows it outside', async (
   assert.equal((await lstat(join(harness.runtimeDir, 'repo'))).isDirectory(), true);
 });
 
+test('rejects state and reset after runtimeDir is replaced by an external symlink', async (t) => {
+  const harness = await createHarness(t);
+  const externalDirectory = join(harness.rootDirectory, 'external-runtime');
+  await mkdir(externalDirectory);
+  await mkdir(harness.runtimeDir, { recursive: true });
+  await rm(harness.runtimeDir, { recursive: true });
+  await symlink(externalDirectory, harness.runtimeDir);
+
+  const stateResponse = await fetch(`${harness.baseUrl}/api/state`);
+  const stateError = await readJson(stateResponse);
+  const reset = await postJson(harness.baseUrl, '/api/reset');
+
+  assert.equal(stateResponse.status, 409);
+  assert.deepEqual(stateError, {
+    error: 'Runtime directory identity changed; restart the demo safely',
+    code: 'RUNTIME_INTEGRITY_ERROR',
+  });
+  assert.equal(reset.response.status, 409);
+  assert.deepEqual(reset.value, stateError);
+  assert.deepEqual(await readdir(externalDirectory), []);
+});
+
 test('rejects a concurrent run while one real worker assignment is active', async (t) => {
   const harness = await createHarness(t);
   await postJson(harness.baseUrl, '/api/reset');
@@ -350,6 +398,54 @@ test('rejects a concurrent run while one real worker assignment is active', asyn
   assert.equal(successful.value.phase, 'awaiting_review');
   assert.equal(successful.value.assignments.length, 1);
   assert.equal(successful.value.tickets[0].commits.length, 1);
+});
+
+test('maps corrupt persisted state to STORE_ERROR and reset rebuilds it', async (t) => {
+  const harness = await createHarness(t);
+  await writeFile(join(harness.runtimeDir, 'state.json'), '{broken', 'utf8');
+
+  const stateResponse = await fetch(`${harness.baseUrl}/api/state`);
+  const stateError = await readJson(stateResponse);
+  const issue = await postJson(harness.baseUrl, '/api/issue', {
+    title: 'Must not mutate corrupt state',
+    requester: 'store-test',
+    text: 'Use reset before accepting this Issue.',
+  });
+
+  assert.equal(stateResponse.status, 500);
+  assert.deepEqual(stateError, {
+    error: 'Unable to load demo state. Use reset to rebuild the demo state.',
+    code: 'STORE_ERROR',
+  });
+  assert.equal(JSON.stringify(stateError).includes(harness.runtimeDir), false);
+  assert.equal(issue.response.status, 500);
+  assert.deepEqual(issue.value, stateError);
+
+  const reset = await postJson(harness.baseUrl, '/api/reset');
+  assert.equal(reset.response.status, 200);
+  assert.equal(reset.value.phase, 'ready');
+  assert.deepEqual(
+    JSON.parse(await readFile(join(harness.runtimeDir, 'state.json'), 'utf8')),
+    reset.value,
+  );
+});
+
+test('maps a low-level StoreError without exposing its state path', async (t) => {
+  const harness = await createHarness(t);
+  const externalDirectory = join(harness.rootDirectory, 'external-state-dir');
+  await mkdir(externalDirectory);
+  await symlink(externalDirectory, join(harness.runtimeDir, 'state.json'));
+
+  const response = await fetch(`${harness.baseUrl}/api/state`);
+  const error = await readJson(response);
+
+  assert.equal(response.status, 500);
+  assert.deepEqual(error, {
+    error: 'Unable to load demo state. Use reset to rebuild the demo state.',
+    code: 'STORE_ERROR',
+  });
+  assert.equal(JSON.stringify(error).includes(harness.runtimeDir), false);
+  assert.equal(JSON.stringify(error).includes(externalDirectory), false);
 });
 
 test('returns JSON 404 and endpoint-specific 405 responses', async (t) => {
@@ -548,4 +644,29 @@ test('rejects dangerous nesting between runtime, public, and fixture paths', asy
     }),
     /separate directory trees/i,
   );
+});
+
+test('rejects an existing symbolic link in the runtime ancestor chain', async (t) => {
+  const rootDirectory = await mkdtemp(join(tmpdir(), 'superagent-ancestor-'));
+  const publicDir = join(rootDirectory, 'public');
+  const externalDirectory = join(rootDirectory, 'external');
+  const linkedParent = join(rootDirectory, 'linked-parent');
+  await mkdir(publicDir);
+  await mkdir(externalDirectory);
+  await symlink(externalDirectory, linkedParent);
+  t.after(() => rm(rootDirectory, { recursive: true, force: true }));
+
+  assert.throws(
+    () => createDemoServer({
+      runtimeDir: join(linkedParent, 'runtime'),
+      publicDir,
+      fixtureDir: fixtureDirectory,
+    }),
+    (error) => {
+      assert.equal(error.code, 'RUNTIME_INTEGRITY_ERROR');
+      assert.equal(error.message.includes(rootDirectory), false);
+      return true;
+    },
+  );
+  assert.deepEqual(await readdir(externalDirectory), []);
 });
