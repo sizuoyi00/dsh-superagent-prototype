@@ -11,7 +11,8 @@ import {
 } from './git-safety.mjs';
 import {
   ASSIGNMENT_BRANCH, assertTreeHasNoSymbolicLinks, assertTrustedDirectoryPath,
-  GitRecoveryError, restoreGitRepository, validateRecoveryCommits,
+  assertTrustedRepositoryRoot, GitRecoveryError, restoreGitRepository,
+  validateRecoveryCommits, validateTrustedInitialCommit,
 } from './git-recovery.mjs';
 import { ProcessError, runProcess } from './process.mjs';
 
@@ -258,8 +259,10 @@ export class GitWorker {
       throw new GitWorkerError('Git worker has already been initialized');
     }
     let hashes;
+    let trustedInitialCommit;
     try {
       hashes = validateRecoveryCommits(options);
+      trustedInitialCommit = validateTrustedInitialCommit(options, hashes);
     } catch (cause) {
       throw new GitWorkerError(cause.message, { cause });
     }
@@ -267,9 +270,11 @@ export class GitWorker {
     try {
       await assertTrustedDirectoryPath(dirname(this.#repoDir));
       this.#gitIdentity = await prepareGitSafetyForResume(this.#repoDir);
+      await assertTrustedRepositoryRoot(this.#repoDir, trustedInitialCommit);
       const resumed = await restoreGitRepository({
         hashes,
         git: (args) => this.#git(args),
+        trustedInitialCommit,
       });
       this.#initialCommit = resumed.initialCommit;
       this.#stage = resumed.stage;

@@ -1,4 +1,5 @@
-import { lstat, readdir } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, open, readdir } from 'node:fs/promises';
 import { parse, relative, resolve, sep } from 'node:path';
 
 export const ASSIGNMENT_BRANCH = 'agent/demo-discount-boundary';
@@ -37,7 +38,14 @@ export async function assertTrustedDirectoryPath(directoryPath) {
   }
 }
 
-const COMMIT_HASH = /^[0-9a-f]{40}$/i;
+const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+
+function normalizeObjectId(value, label) {
+  if (typeof value !== 'string' || !OBJECT_ID.test(value)) {
+    throw new GitRecoveryError(`${label} must be a full 40 or 64 character hexadecimal object ID`);
+  }
+  return value.toLowerCase();
+}
 
 export function validateRecoveryCommits(options) {
   if (!options || typeof options !== 'object' || !Array.isArray(options.commits)) {
@@ -47,16 +55,57 @@ export function validateRecoveryCommits(options) {
     throw new GitRecoveryError('resume accepts at most two persisted commits');
   }
   const hashes = options.commits.map((commit) => {
-    const hash = commit?.hash;
-    if (typeof hash !== 'string' || !COMMIT_HASH.test(hash)) {
-      throw new GitRecoveryError('Persisted commit hash must be a full hexadecimal object ID');
-    }
-    return hash.toLowerCase();
+    return normalizeObjectId(commit?.hash, 'Persisted commit hash');
   });
   if (new Set(hashes).size !== hashes.length) {
     throw new GitRecoveryError('Persisted commit hashes must be distinct');
   }
   return Object.freeze(hashes);
+}
+
+export function validateTrustedInitialCommit(options, hashes) {
+  const trustedInitialCommit = normalizeObjectId(
+    options?.trustedInitialCommit,
+    'Trusted initial commit',
+  );
+  if (hashes.some((hash) => hash.length !== trustedInitialCommit.length)) {
+    throw new GitRecoveryError('Persisted commits must use the trusted initial commit object format');
+  }
+  return trustedInitialCommit;
+}
+
+function assertStableReference(before, after) {
+  if (
+    !before.isFile() || !after.isFile() || before.nlink !== 1 ||
+    before.dev !== after.dev || before.ino !== after.ino ||
+    before.nlink !== after.nlink
+  ) {
+    throw new GitRecoveryError('Runtime main reference identity changed');
+  }
+}
+
+export async function assertTrustedRepositoryRoot(repositoryDirectory, trustedInitialCommit) {
+  const referencePath = resolve(repositoryDirectory, '.git/refs/heads/main');
+  const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
+  let referenceHandle;
+  try {
+    referenceHandle = await open(referencePath, flags);
+    const before = await referenceHandle.stat();
+    const referenceContent = await referenceHandle.readFile('utf8');
+    const currentInitialCommit = normalizeObjectId(
+      referenceContent.endsWith('\n') ? referenceContent.slice(0, -1) : referenceContent,
+      'Runtime main reference',
+    );
+    assertStableReference(before, await lstat(referencePath));
+    if (currentInitialCommit !== trustedInitialCommit) {
+      throw new GitRecoveryError('Runtime repository root does not match the trusted initial commit');
+    }
+  } catch (cause) {
+    if (cause instanceof GitRecoveryError) throw cause;
+    throw new GitRecoveryError('Runtime main reference is unavailable', { cause });
+  } finally {
+    await referenceHandle?.close();
+  }
 }
 
 function parseLinearHistory(output) {
@@ -84,13 +133,16 @@ function assertPersistedPrefix(history, hashes) {
   }
 }
 
-export async function restoreGitRepository({ git, hashes }) {
+export async function restoreGitRepository({ git, hashes, trustedInitialCommit }) {
   const historyResult = await git([
     'rev-list', '--reverse', '--topo-order', '--parents', '--all',
   ]);
   const history = parseLinearHistory(historyResult.stdout);
   assertPersistedPrefix(history, hashes);
   const rootCommit = history[0].hash;
+  if (rootCommit !== trustedInitialCommit) {
+    throw new GitRecoveryError('Runtime repository root does not match the trusted initial commit');
+  }
   const targetCommit = hashes.at(-1) ?? rootCommit;
   const branch = hashes.length === 0 ? 'main' : ASSIGNMENT_BRANCH;
 

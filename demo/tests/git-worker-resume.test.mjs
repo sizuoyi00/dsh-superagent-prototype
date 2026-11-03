@@ -35,6 +35,12 @@ async function postJson(baseUrl, pathname, body = {}) {
   return { response, value: JSON.parse(await response.text()) };
 }
 
+function assertResetRequired(result) {
+  assert.equal(result.response.status, 409);
+  assert.equal(result.value.code, 'WORKER_NOT_READY');
+  assert.match(result.value.error, /reset/i);
+}
+
 async function createServerHarness(t) {
   const rootDirectory = await mkdtemp(join(tmpdir(), 'superagent-resume-'));
   const runtimeDir = join(rootDirectory, 'runtime');
@@ -96,6 +102,27 @@ test('an initial failure retries the initial worker phase when no commit persist
   assert.equal(retried.value.assignments.at(-1).status, 'completed');
 });
 
+test('reset persists the trusted initial commit through domain transitions', async (t) => {
+  const harness = await createServerHarness(t);
+  const running = await harness.start();
+  const reset = await postJson(running.baseUrl, '/api/reset');
+  const root = await runGit(harness.runtimeDir, [
+    '-C', 'repo', 'rev-list', '--max-parents=0', 'HEAD',
+  ]);
+  const issued = await postJson(running.baseUrl, '/api/issue', {
+    title: 'Preserve the repository root',
+    requester: 'anchor-test',
+    text: 'Keep the trusted root in durable state.',
+  });
+  const persisted = JSON.parse(
+    await readFile(join(harness.runtimeDir, 'state.json'), 'utf8'),
+  );
+
+  assert.equal(reset.value.repository.initialCommit, root.stdout.trim());
+  assert.equal(issued.value.repository.initialCommit, root.stdout.trim());
+  assert.equal(persisted.repository.initialCommit, root.stdout.trim());
+});
+
 test('resume with zero commits discards unpersisted work and restores initial readiness', async () => {
   const { worker, repositoryDirectory, initialized } = await createInitializedWorker();
   await worker.runAssignment('initial');
@@ -104,7 +131,10 @@ test('resume with zero commits discards unpersisted work and restores initial re
     repoDir: repositoryDirectory,
   });
 
-  const resumed = await resumedWorker.resume({ commits: [] });
+  const resumed = await resumedWorker.resume({
+    commits: [],
+    trustedInitialCommit: initialized.initialCommit,
+  });
   const [head, branch, status, assignmentBranch] = await Promise.all([
     runGit(repositoryDirectory, ['rev-parse', 'HEAD']),
     runGit(repositoryDirectory, ['branch', '--show-current']),
@@ -121,7 +151,7 @@ test('resume with zero commits discards unpersisted work and restores initial re
 });
 
 test('resume with one commit rolls back an unpersisted follow-up and permits retry', async () => {
-  const { worker, repositoryDirectory } = await createInitializedWorker();
+  const { worker, repositoryDirectory, initialized } = await createInitializedWorker();
   const first = await worker.runAssignment('initial');
   await worker.runAssignment('follow-up');
   const resumedWorker = new GitWorker({
@@ -129,7 +159,10 @@ test('resume with one commit rolls back an unpersisted follow-up and permits ret
     repoDir: repositoryDirectory,
   });
 
-  const resumed = await resumedWorker.resume({ commits: first.commits });
+  const resumed = await resumedWorker.resume({
+    commits: first.commits,
+    trustedInitialCommit: initialized.initialCommit,
+  });
   const [head, branch, status] = await Promise.all([
     runGit(repositoryDirectory, ['rev-parse', 'HEAD']),
     runGit(repositoryDirectory, ['branch', '--show-current']),
@@ -144,7 +177,7 @@ test('resume with one commit rolls back an unpersisted follow-up and permits ret
 });
 
 test('resume with two commits restores the completed milestone', async () => {
-  const { worker, repositoryDirectory } = await createInitializedWorker();
+  const { worker, repositoryDirectory, initialized } = await createInitializedWorker();
   await worker.runAssignment('initial');
   const completed = await worker.runAssignment('follow-up');
   const resumedWorker = new GitWorker({
@@ -152,7 +185,10 @@ test('resume with two commits restores the completed milestone', async () => {
     repoDir: repositoryDirectory,
   });
 
-  const resumed = await resumedWorker.resume({ commits: completed.commits });
+  const resumed = await resumedWorker.resume({
+    commits: completed.commits,
+    trustedInitialCommit: initialized.initialCommit,
+  });
 
   assert.equal(resumed.stage, 'complete');
   await assert.rejects(resumedWorker.runAssignment('initial'), /worker is complete/i);
@@ -160,24 +196,43 @@ test('resume with two commits restores the completed milestone', async () => {
 });
 
 test('resume validates persisted commit hashes and history before restoration', async () => {
-  const { repositoryDirectory } = await createInitializedWorker();
+  const { repositoryDirectory, initialized } = await createInitializedWorker();
   const resumedWorker = new GitWorker({
     fixtureDir: fixtureDirectory,
     repoDir: repositoryDirectory,
   });
   await assert.rejects(
-    resumedWorker.resume({ commits: [{ hash: 'not-a-commit' }] }),
+    resumedWorker.resume({
+      commits: [{ hash: 'not-a-commit' }],
+      trustedInitialCommit: initialized.initialCommit,
+    }),
     /commit hash/i,
   );
   await assert.rejects(
-    resumedWorker.resume({ commits: [
-      { hash: 'a'.repeat(40) },
-      { hash: 'b'.repeat(40) },
-      { hash: 'c'.repeat(40) },
-    ] }),
+    resumedWorker.resume({
+      commits: [
+        { hash: 'a'.repeat(40) },
+        { hash: 'b'.repeat(40) },
+        { hash: 'c'.repeat(40) },
+      ],
+      trustedInitialCommit: initialized.initialCommit,
+    }),
     /at most two/i,
   );
-  assert.equal((await resumedWorker.resume({ commits: [] })).stage, 'ready');
+  await assert.rejects(
+    resumedWorker.resume({
+      commits: [
+        { hash: initialized.initialCommit },
+        { hash: initialized.initialCommit },
+      ],
+      trustedInitialCommit: initialized.initialCommit,
+    }),
+    /distinct/i,
+  );
+  assert.equal((await resumedWorker.resume({
+    commits: [],
+    trustedInitialCommit: initialized.initialCommit,
+  })).stage, 'ready');
 });
 
 function createProcessObserver() {
@@ -191,9 +246,70 @@ function createProcessObserver() {
   };
 }
 
+for (const persistedCommitCount of [0, 1]) {
+  test(`resume rejects a mismatched root anchor before Git with ${persistedCommitCount} persisted commit`, async () => {
+    const { worker, repositoryDirectory, initialized } = await createInitializedWorker();
+    const commits = persistedCommitCount === 0
+      ? []
+      : (await worker.runAssignment('initial')).commits;
+    const tree = await runGit(repositoryDirectory, [
+      'rev-parse', `${initialized.initialCommit}^{tree}`,
+    ]);
+    const replacementRoot = await runGit(repositoryDirectory, [
+      'commit-tree', tree.stdout.trim(), '-m', 'tampered root',
+    ]);
+    await runGit(repositoryDirectory, [
+      'update-ref', 'refs/heads/main', replacementRoot.stdout.trim(),
+    ]);
+    const observer = createProcessObserver();
+    const resumedWorker = new GitWorker({
+      fixtureDir: fixtureDirectory,
+      repoDir: repositoryDirectory,
+      processRunner: observer.runner,
+    });
+    await assert.rejects(
+      resumedWorker.resume({
+        commits,
+        trustedInitialCommit: initialized.initialCommit,
+      }),
+      /initial commit|root|resume/i,
+    );
+    assert.deepEqual(observer.calls, []);
+  });
+}
+
+test('resume requires a 40 or 64 hexadecimal trusted initial commit', async () => {
+  const { repositoryDirectory } = await createInitializedWorker();
+  const observer = createProcessObserver();
+  const resumedWorker = new GitWorker({
+    fixtureDir: fixtureDirectory,
+    repoDir: repositoryDirectory,
+    processRunner: observer.runner,
+  });
+
+  for (const trustedInitialCommit of [undefined, 'abc', 'g'.repeat(40)]) {
+    await assert.rejects(
+      resumedWorker.resume({ commits: [], trustedInitialCommit }),
+      /trusted initial commit/i,
+    );
+  }
+  await assert.rejects(
+    resumedWorker.resume({
+      commits: [{ hash: 'b'.repeat(40) }],
+      trustedInitialCommit: 'a'.repeat(64),
+    }),
+    /object format/i,
+  );
+  await assert.rejects(
+    resumedWorker.resume({ commits: [], trustedInitialCommit: 'a'.repeat(64) }),
+    /initial commit|root/i,
+  );
+  assert.deepEqual(observer.calls, []);
+});
+
 for (const unsafeControl of ['global config', 'hook']) {
   test(`resume rejects an unsafe ${unsafeControl} before any Git process`, async () => {
-    const { repositoryDirectory } = await createInitializedWorker();
+    const { repositoryDirectory, initialized } = await createInitializedWorker();
     const controlDirectory = join(repositoryDirectory, '.git/superagent-control');
     if (unsafeControl === 'global config') {
       await writeFile(join(controlDirectory, 'global.config'), '[core]\n\thooksPath =\n');
@@ -207,13 +323,16 @@ for (const unsafeControl of ['global config', 'hook']) {
       processRunner: observer.runner,
     });
 
-    await assert.rejects(resumedWorker.resume({ commits: [] }), /Git safety|resume/i);
+    await assert.rejects(resumedWorker.resume({
+      commits: [],
+      trustedInitialCommit: initialized.initialCommit,
+    }), /Git safety|resume/i);
     assert.deepEqual(observer.calls, []);
   });
 }
 
 test('resume replaces hostile local Git config before the first Git process', async () => {
-  const { repositoryDirectory } = await createInitializedWorker();
+  const { repositoryDirectory, initialized } = await createInitializedWorker();
   const configPath = join(repositoryDirectory, '.git/config');
   const markerPath = join(repositoryDirectory, '../local-config-ran.txt');
   const markerScript = join(repositoryDirectory, '../write-marker.sh');
@@ -230,7 +349,10 @@ test('resume replaces hostile local Git config before the first Git process', as
     processRunner: observer.runner,
   });
 
-  await resumedWorker.resume({ commits: [] });
+  await resumedWorker.resume({
+    commits: [],
+    trustedInitialCommit: initialized.initialCommit,
+  });
 
   assert.ok(observer.calls.length > 0);
   assert.equal((await readFile(configPath, 'utf8')).includes(markerScript), false);
@@ -287,4 +409,58 @@ test('restart recovers an interrupted follow-up and runs the second commit', asy
   assert.equal(recovered.value.phase, 'queued');
   assert.equal(completed.response.status, 200);
   assert.equal(completed.value.tickets[0].commits.length, 2);
+});
+
+test('restart rejects an amended root before Git or fixture tests can run', async (t) => {
+  const harness = await createServerHarness(t);
+  const original = await harness.start();
+  await postJson(original.baseUrl, '/api/reset');
+  await postJson(original.baseUrl, '/api/issue', {
+    title: 'Reject an amended root',
+    requester: 'anchor-test',
+    text: 'Do not execute repository content from an untrusted root.',
+  });
+  await closeServer(original.server);
+
+  const repositoryDirectory = join(harness.runtimeDir, 'repo');
+  const markerPath = join(harness.rootDirectory, 'fixture-test-ran.txt');
+  await writeFile(
+    join(repositoryDirectory, 'test/recovery-marker.test.mjs'),
+    `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(markerPath)}, 'ran');\n`,
+  );
+  await runGit(repositoryDirectory, ['add', '--all']);
+  await runGit(repositoryDirectory, ['commit', '--amend', '--no-edit']);
+
+  const restarted = await harness.start();
+  const recovered = await postJson(restarted.baseUrl, '/api/recover');
+  const run = await postJson(restarted.baseUrl, '/api/run');
+
+  assertResetRequired(recovered);
+  assertResetRequired(run);
+  await assert.rejects(lstat(markerPath), { code: 'ENOENT' });
+});
+
+test('restart requires reset when durable state has no trusted initial commit', async (t) => {
+  const harness = await createServerHarness(t);
+  const original = await harness.start();
+  await postJson(original.baseUrl, '/api/reset');
+  await postJson(original.baseUrl, '/api/issue', {
+    title: 'Reject legacy recovery state',
+    requester: 'anchor-test',
+    text: 'Do not infer a root when the durable anchor is absent.',
+  });
+  await closeServer(original.server);
+
+  const statePath = join(harness.runtimeDir, 'state.json');
+  const persisted = JSON.parse(await readFile(statePath, 'utf8'));
+  const { repository: omittedRepository, ...withoutRepository } = persisted;
+  assert.ok(omittedRepository);
+  await writeFile(statePath, JSON.stringify(withoutRepository));
+
+  const restarted = await harness.start();
+  const recovered = await postJson(restarted.baseUrl, '/api/recover');
+  const run = await postJson(restarted.baseUrl, '/api/run');
+
+  assertResetRequired(recovered);
+  assertResetRequired(run);
 });

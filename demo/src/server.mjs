@@ -1,10 +1,7 @@
 import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
 import { lstat, readFile, realpath, rm, stat, unlink } from 'node:fs/promises';
 import { Server } from 'node:http';
-import {
-  basename, dirname, extname, isAbsolute, join,
-  parse, relative, resolve, sep,
-} from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -68,6 +65,8 @@ class StoreAccessError extends RequestError {
     this.name = 'StoreAccessError';
   }
 }
+
+function recoveryResetRequired() { return new RequestError(409, 'WORKER_NOT_READY', 'Reset the demo before recovering work'); }
 
 class LoopbackServer extends Server {
   listen(...args) {
@@ -598,9 +597,9 @@ export function createDemoServer({ runtimeDir, publicDir, fixtureDir, doctor = c
     await prepareRuntimeRepository();
     const nextWorker = createWorker();
     runtimeGuard.verify();
-    await nextWorker.initialize();
+    const { initialCommit } = await nextWorker.initialize();
     runtimeGuard.refreshAfterControlledDirectoryChange();
-    const resetState = await saveState(createState());
+    const resetState = await saveState({ ...createState(), repository: { initialCommit } });
     worker = nextWorker;
     return resetState;
   }
@@ -608,9 +607,11 @@ export function createDemoServer({ runtimeDir, publicDir, fixtureDir, doctor = c
   async function resumeWorker(state) {
     const ticket = state.tickets.at(-1);
     if (!ticket) return;
+    if (!state.repository?.initialCommit) throw recoveryResetRequired();
     const nextWorker = createWorker();
     runtimeGuard.verify();
-    await nextWorker.resume({ commits: ticket.commits });
+    try { await nextWorker.resume({ commits: ticket.commits, trustedInitialCommit: state.repository.initialCommit }); }
+    catch { throw recoveryResetRequired(); }
     runtimeGuard.verify();
     worker = nextWorker;
   }
