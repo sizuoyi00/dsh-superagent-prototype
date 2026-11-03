@@ -8,6 +8,7 @@ import {
   mkdir,
   readFile,
   readdir,
+  rename,
   rm,
   symlink,
   unlink,
@@ -82,6 +83,29 @@ function createInjectedRedRunner(redResult) {
   };
 }
 
+function createInjectedGreenRunner(greenResult) {
+  let testRunCount = 0;
+  return async (command, args, options) => {
+    if (command === process.execPath && args[0] === '--test') {
+      testRunCount += 1;
+      if (testRunCount === 2) return greenResult;
+    }
+    return runProcess(command, args, options);
+  };
+}
+
+function createInjectedGitResultRunner(overrides) {
+  let injected = false;
+  return async (command, args, options) => {
+    const result = await runProcess(command, args, options);
+    if (!injected && command === 'git' && args.includes('log')) {
+      injected = true;
+      return { ...result, ...overrides };
+    }
+    return result;
+  };
+}
+
 function createTruncatingRunner(shouldTruncate) {
   return async (command, args, options) => {
     const result = await runProcess(command, args, options);
@@ -101,6 +125,37 @@ async function runGit(repositoryDirectory, args) {
   return runProcess('git', args, {
     cwd: repositoryDirectory,
     rejectOnNonZero: true,
+  });
+}
+
+async function initializeRepository(repositoryDirectory, branch) {
+  await mkdir(repositoryDirectory);
+  await runGit(repositoryDirectory, ['init', `--initial-branch=${branch}`]);
+  await runGit(repositoryDirectory, ['config', 'user.name', 'Outside Repo']);
+  await runGit(repositoryDirectory, [
+    'config',
+    'user.email',
+    'outside@example.invalid',
+  ]);
+  await writeFile(join(repositoryDirectory, 'sentinel.txt'), 'outside\n');
+  await runGit(repositoryDirectory, ['add', 'sentinel.txt']);
+  await runGit(repositoryDirectory, ['commit', '-m', 'outside baseline']);
+}
+
+function createGitObserver() {
+  let enabled = false;
+  let calls = [];
+  return Object.freeze({
+    enable() {
+      enabled = true;
+    },
+    getCalls() {
+      return calls;
+    },
+    async runner(command, args, options) {
+      if (enabled && command === 'git') calls = [...calls, { args, options }];
+      return runProcess(command, args, options);
+    },
   });
 }
 
@@ -402,6 +457,39 @@ test('initialization failure removes its partial repository and staging director
   );
 });
 
+test('initialization failure hides raw and encoded staging paths', async () => {
+  const rootDirectory = await createTemporaryDirectory();
+  const repositoryDirectory = join(rootDirectory, 'runtime repository');
+  let stagingDirectory;
+  const failingProcessRunner = async (command, args, options) => {
+    if (command !== 'git') return runProcess(command, args, options);
+    stagingDirectory = options.cwd;
+    const stagingUrl = pathToFileURL(stagingDirectory).href;
+    throw new ProcessError(
+      'Git initialization failed',
+      createProcessResult({
+        stderr: `staging paths: ${stagingDirectory} ${stagingUrl}`,
+        code: 127,
+      }),
+    );
+  };
+  const worker = new GitWorker({
+    fixtureDir: fixtureDirectory,
+    repoDir: repositoryDirectory,
+    processRunner: failingProcessRunner,
+  });
+
+  await assert.rejects(worker.initialize(), (error) => {
+    const stagingUrl = pathToFileURL(stagingDirectory).href;
+    assert.ok(error instanceof GitWorkerError);
+    assert.equal(error.message.includes(stagingDirectory), false);
+    assert.equal(error.message.includes(stagingUrl), false);
+    assert.match(error.cause.result.stderr, new RegExp(stagingDirectory));
+    assert.equal(error.cause.result.stderr.includes(stagingUrl), true);
+    return true;
+  });
+});
+
 test('assignment containment rejection performs no Git writes and remains retryable', async () => {
   const rootDirectory = await createTemporaryDirectory();
   const repositoryDirectory = join(rootDirectory, 'runtime repository');
@@ -478,6 +566,71 @@ test('assignment rejects a runtime hard link without changing its external targe
   await assert.rejects(worker.runAssignment('initial'), /hard link/i);
   assert.equal(await readFile(externalFile, 'utf8'), externalContent);
 });
+
+test('Git metadata identity rejects a replaced .git before any Git process', async () => {
+  const rootDirectory = await createTemporaryDirectory();
+  const externalRepository = join(rootDirectory, 'outside repository');
+  await initializeRepository(externalRepository, 'outside');
+  const externalHead = await runGit(externalRepository, ['rev-parse', 'HEAD']);
+  const externalBranch = await runGit(externalRepository, [
+    'branch',
+    '--show-current',
+  ]);
+  const observer = createGitObserver();
+  const { worker, repositoryDirectory } = await createInitializedWorker(
+    observer.runner,
+  );
+  await rename(
+    join(repositoryDirectory, '.git'),
+    join(rootDirectory, 'original runtime git'),
+  );
+  await symlink(
+    join(externalRepository, '.git'),
+    join(repositoryDirectory, '.git'),
+  );
+  observer.enable();
+
+  await assert.rejects(worker.runAssignment('initial'), /Git metadata identity/i);
+  assert.deepEqual(observer.getCalls(), []);
+  const [headAfterAttack, branchAfterAttack] = await Promise.all([
+    runGit(externalRepository, ['rev-parse', 'HEAD']),
+    runGit(externalRepository, ['branch', '--show-current']),
+  ]);
+  assert.equal(headAfterAttack.stdout, externalHead.stdout);
+  assert.equal(branchAfterAttack.stdout, externalBranch.stdout);
+});
+
+for (const replacement of ['symbolic link', 'new directory']) {
+  test(`Git metadata identity rejects a control ${replacement} before Git`, async () => {
+    const observer = createGitObserver();
+    const { worker, repositoryDirectory } = await createInitializedWorker(
+      observer.runner,
+    );
+    const controlDirectory = join(
+      repositoryDirectory,
+      '.git/superagent-control',
+    );
+    const displacedControl = join(
+      repositoryDirectory,
+      '.git/original-superagent-control',
+    );
+    await rename(controlDirectory, displacedControl);
+    if (replacement === 'symbolic link') {
+      const externalControl = join(repositoryDirectory, '../outside-control');
+      await mkdir(externalControl);
+      await symlink(externalControl, controlDirectory);
+    } else {
+      await mkdir(controlDirectory);
+    }
+    observer.enable();
+
+    await assert.rejects(
+      worker.runAssignment('initial'),
+      /Git metadata identity/i,
+    );
+    assert.deepEqual(observer.getCalls(), []);
+  });
+}
 
 test('initialization ignores Git environment variables that redirect side effects', async () => {
   const rootDirectory = await createTemporaryDirectory();
@@ -598,6 +751,28 @@ test('fixture tests receive only the minimal child process environment', async (
   }
 });
 
+test('post-initialization Git uses explicit verified repository paths', async () => {
+  let observeGit = false;
+  let gitEnvironments = [];
+  const observingRunner = async (command, args, options) => {
+    if (observeGit && command === 'git') {
+      gitEnvironments = [...gitEnvironments, { ...options.env }];
+    }
+    return runProcess(command, args, options);
+  };
+  const { worker, repositoryDirectory } = await createInitializedWorker(
+    observingRunner,
+  );
+  observeGit = true;
+  await worker.runAssignment('initial');
+
+  assert.ok(gitEnvironments.length > 0);
+  for (const environment of gitEnvironments) {
+    assert.equal(environment.GIT_DIR, join(repositoryDirectory, '.git'));
+    assert.equal(environment.GIT_WORK_TREE, repositoryDirectory);
+  }
+});
+
 const expectedFailureOutput = createRedOutput({
   failedNames: [expectedInitialRegressionName],
 });
@@ -674,6 +849,54 @@ test('assignment rejects truncated green test evidence', async () => {
 
   await assert.rejects(worker.runAssignment('initial'), /truncated/i);
 });
+
+test('invalid green exit rolls back without commit and permits retry', async () => {
+  const invalidGreen = createProcessResult({
+    stdout: createRedOutput({ failedNames: ['green suite failure'] }),
+    code: 9,
+  });
+  const { worker, repositoryDirectory, initialized } =
+    await createInitializedWorker(createInjectedGreenRunner(invalidGreen));
+
+  await assert.rejects(worker.runAssignment('initial'), /green test result/i);
+  const [branch, head, status, commitCount] = await Promise.all([
+    runGit(repositoryDirectory, ['branch', '--show-current']),
+    runGit(repositoryDirectory, ['rev-parse', 'HEAD']),
+    runGit(repositoryDirectory, ['status', '--short']),
+    runGit(repositoryDirectory, ['rev-list', '--count', 'HEAD']),
+  ]);
+  assert.equal(branch.stdout.trim(), 'main');
+  assert.equal(head.stdout.trim(), initialized.initialCommit);
+  assert.equal(status.stdout, '');
+  assert.equal(commitCount.stdout.trim(), '1');
+  assert.equal((await worker.runAssignment('initial')).tests.ok, true);
+});
+
+for (const [description, overrides] of [
+  ['signal', { code: 0, signal: 'SIGTERM' }],
+  ['timeout', { code: 0, signal: 'SIGKILL', timedOut: true }],
+]) {
+  test(`green evidence rejects a ${description} result`, async () => {
+    const greenResult = createProcessResult(overrides);
+    const { worker } = await createInitializedWorker(
+      createInjectedGreenRunner(greenResult),
+    );
+    await assert.rejects(worker.runAssignment('initial'), /green test result/i);
+  });
+}
+
+for (const [description, overrides] of [
+  ['non-zero exit', { code: 7 }],
+  ['signal', { code: 0, signal: 'SIGTERM' }],
+  ['timeout', { code: 0, signal: 'SIGKILL', timedOut: true }],
+]) {
+  test(`Git evidence rejects a ${description} result`, async () => {
+    const { worker } = await createInitializedWorker(
+      createInjectedGitResultRunner(overrides),
+    );
+    await assert.rejects(worker.runAssignment('initial'), /Git command result/i);
+  });
+}
 
 test('assignment rejects truncated Git evidence', async () => {
   const { worker } = await createInitializedWorker(

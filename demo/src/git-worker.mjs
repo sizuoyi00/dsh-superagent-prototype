@@ -110,22 +110,36 @@ function combineOutput(result) {
     .join('\n');
 }
 
-function sanitizeResult(value, repoDir) {
+function assertSuccessfulResult(result, label) {
+  const failures = [
+    result.code === 0 ? undefined : `exit code ${String(result.code)}`,
+    result.signal === null ? undefined : `signal ${String(result.signal)}`,
+    result.timedOut === false ? undefined : 'timed out',
+    result.outputTruncated === false ? undefined : 'output was truncated',
+  ].filter(Boolean);
+  if (failures.length > 0) {
+    throw new GitWorkerError(`${label} result is invalid: ${failures.join(', ')}`);
+  }
+}
+
+function sanitizeResult(value, privatePath, replacement = '<repo>') {
   if (typeof value === 'string') {
     return value
-      .split(pathToFileURL(repoDir).href)
-      .join('<repo>')
-      .split(repoDir)
-      .join('<repo>');
+      .split(pathToFileURL(privatePath).href)
+      .join(replacement)
+      .split(privatePath)
+      .join(replacement);
   }
   if (Array.isArray(value)) {
-    return value.map((item) => sanitizeResult(item, repoDir));
+    return value.map((item) =>
+      sanitizeResult(item, privatePath, replacement),
+    );
   }
   if (value && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value).map(([key, item]) => [
         key,
-        sanitizeResult(item, repoDir),
+        sanitizeResult(item, privatePath, replacement),
       ]),
     );
   }
@@ -184,6 +198,7 @@ export class GitWorker {
   #processRunner;
   #stage = 'uninitialized';
   #initialCommit;
+  #gitIdentity;
 
   constructor({ fixtureDir, repoDir, processRunner = runProcess }) {
     if (typeof fixtureDir !== 'string' || typeof repoDir !== 'string') {
@@ -266,6 +281,7 @@ export class GitWorker {
       await this.#assertRepositoryDoesNotExist();
       await rename(stagingDirectory, this.#repoDir);
       stagingDirectory = undefined;
+      this.#gitIdentity = await this.#captureGitIdentity();
       this.#initialCommit = initialCommit;
       this.#stage = 'ready';
 
@@ -282,7 +298,11 @@ export class GitWorker {
         }
       }
       this.#stage = 'uninitialized';
-      throw this.#wrapError('Failed to initialize the runtime repository', cause);
+      throw this.#wrapError(
+        'Failed to initialize the runtime repository',
+        cause,
+        stagingDirectory ? [stagingDirectory] : [],
+      );
     }
   }
 
@@ -413,6 +433,77 @@ export class GitWorker {
       assignmentBranchExisted:
         assignmentBranchResult.stdout.trim() === ASSIGNMENT_BRANCH,
     });
+  }
+
+  #gitIdentityPaths() {
+    const gitDirectory = resolve(this.#repoDir, '.git');
+    const controlDirectory = resolve(gitDirectory, 'superagent-control');
+    return [
+      { path: this.#repoDir, kind: 'directory' },
+      { path: gitDirectory, kind: 'directory' },
+      { path: controlDirectory, kind: 'directory' },
+      { path: resolve(controlDirectory, 'home'), kind: 'directory' },
+      { path: resolve(controlDirectory, 'xdg'), kind: 'directory' },
+      { path: resolve(controlDirectory, 'hooks'), kind: 'directory' },
+      { path: resolve(controlDirectory, 'global.config'), kind: 'file' },
+    ];
+  }
+
+  async #captureGitIdentity() {
+    let identities = [];
+    try {
+      for (const { path, kind } of this.#gitIdentityPaths()) {
+        const metadata = await lstat(path);
+        const hasExpectedKind =
+          kind === 'directory'
+            ? metadata.isDirectory()
+            : metadata.isFile();
+        if (metadata.isSymbolicLink() || !hasExpectedKind) {
+          throw new GitWorkerError('Git metadata identity is invalid');
+        }
+        const canonicalPath = await realpath(path);
+        if (!isWithin(this.#repoDir, canonicalPath)) {
+          throw new GitWorkerError('Git metadata identity escapes repository');
+        }
+        identities = [
+          ...identities,
+          Object.freeze({
+            path,
+            kind,
+            canonicalPath,
+            device: metadata.dev,
+            inode: metadata.ino,
+          }),
+        ];
+      }
+    } catch (cause) {
+      if (cause instanceof GitWorkerError) throw cause;
+      throw new GitWorkerError('Git metadata identity is unavailable', {
+        cause,
+      });
+    }
+    return Object.freeze(identities);
+  }
+
+  async #assertGitIdentity() {
+    if (!this.#gitIdentity) {
+      throw new GitWorkerError('Git metadata identity was not recorded');
+    }
+    const currentIdentity = await this.#captureGitIdentity();
+    const matches = currentIdentity.every((current, index) => {
+      const expected = this.#gitIdentity[index];
+      return (
+        expected !== undefined &&
+        current.path === expected.path &&
+        current.kind === expected.kind &&
+        current.canonicalPath === expected.canonicalPath &&
+        current.device === expected.device &&
+        current.inode === expected.inode
+      );
+    });
+    if (!matches || currentIdentity.length !== this.#gitIdentity.length) {
+      throw new GitWorkerError('Git metadata identity changed');
+    }
   }
 
   async #rollbackAssignment(checkpoint) {
@@ -594,9 +685,7 @@ export class GitWorker {
       rejectOnNonZero,
       env: { ...TEST_ENVIRONMENT },
     });
-    if (result.code === 0 && result.outputTruncated) {
-      throw new GitWorkerError('Successful test output was truncated');
-    }
+    if (rejectOnNonZero) assertSuccessfulResult(result, 'Green test');
     return result;
   }
 
@@ -702,12 +791,20 @@ export class GitWorker {
     cwd = this.#repoDir,
     controlDirectory = resolve(cwd, '.git/superagent-control'),
   ) {
+    const usesRuntimeRepository = cwd === this.#repoDir;
+    if (usesRuntimeRepository) await this.#assertGitIdentity();
     const gitEnvironment = {
       ...TEST_ENVIRONMENT,
       HOME: resolve(controlDirectory, 'home'),
       XDG_CONFIG_HOME: resolve(controlDirectory, 'xdg'),
       GIT_CONFIG_GLOBAL: resolve(controlDirectory, 'global.config'),
       GIT_CONFIG_NOSYSTEM: '1',
+      ...(usesRuntimeRepository
+        ? {
+            GIT_DIR: resolve(this.#repoDir, '.git'),
+            GIT_WORK_TREE: this.#repoDir,
+          }
+        : {}),
     };
     const isolatedArgs = [
       '-c',
@@ -721,17 +818,21 @@ export class GitWorker {
       rejectOnNonZero: true,
       env: gitEnvironment,
     });
-    if (result.outputTruncated) {
-      throw new GitWorkerError('Git command output was truncated');
-    }
+    assertSuccessfulResult(result, 'Git command');
     return result;
   }
 
-  #wrapError(message, cause) {
+  #wrapError(message, cause, additionalPaths = []) {
+    const privatePaths = [
+      [this.#fixtureDir, '<fixture>'],
+      [this.#repoDir, '<repo>'],
+      ...additionalPaths.map((privatePath) => [privatePath, '<staging>']),
+    ];
     const sanitizePublicText = (value) =>
-      sanitizeResult(
-        sanitizeResult(value, this.#fixtureDir),
-        this.#repoDir,
+      privatePaths.reduce(
+        (sanitized, [privatePath, replacement]) =>
+          sanitizeResult(sanitized, privatePath, replacement),
+        value,
       );
     if (cause instanceof GitWorkerError) {
       const publicMessage = sanitizePublicText(cause.message);
