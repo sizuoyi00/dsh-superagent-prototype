@@ -9,15 +9,16 @@
 前提只有 Git 和受支持的 Node.js：Node.js `^22.19.0` 或 `>=24.0.0`。演示不需要 pnpm、npm 安装、GitHub 登录、DSH 或网络。
 
 ```sh
-demo/verify.sh
-demo/start.sh
+repo=/absolute/path/to/dsh-superagent
+"$repo/demo/verify.sh"
+"$repo/demo/start.sh"
 ```
 
-看到 `SuperAgent demo URL` 后，在浏览器打开：
+把 `repo` 改为本 checkout 的绝对路径。看到 server 输出 URL 后，在浏览器打开：
 
 <http://127.0.0.1:4173>
 
-页面顶部始终标明“本地实战模式”。终端保持运行；演示结束按 `Ctrl+C`。如果 4173 已被占用，使用 `DEMO_PORT=4180 demo/start.sh`。
+页面顶部始终标明“本地实战模式”。终端保持运行；演示结束按 `Ctrl+C`。如果 4173 已被占用，使用 `DEMO_PORT=4180 "$repo/demo/start.sh"`。
 
 ## 7 分钟演示脚本
 
@@ -37,10 +38,10 @@ demo/start.sh
 
 | 用途 | 命令或变量 | 说明 |
 | --- | --- | --- |
-| 验收 | `demo/verify.sh` | 可从任意 cwd 运行；检查 Node/Git、fixture、全部 demo tests、JS 语法和 `git diff --check` |
-| 启动 | `demo/start.sh` | 可从任意 cwd 运行；只监听 `127.0.0.1` |
-| 端口 | `DEMO_PORT=4180 demo/start.sh` | 默认 `4173`；只接受 `1..65535` 的十进制整数 |
-| runtime | `DEMO_RUNTIME_DIR=/absolute/demo-runtime demo/start.sh` | 默认是仓库内 `demo/.runtime`；相对路径以仓库根目录为基准；空白值被拒绝 |
+| 验收 | `"$repo/demo/verify.sh"` | `repo` 为 checkout 绝对路径时可从任意 cwd 运行；检查 Node/Git、fixture、全部 demo tests、JS 语法和 `git diff --check` |
+| 启动 | `"$repo/demo/start.sh"` | `repo` 为 checkout 绝对路径时可从任意 cwd 运行；只监听 `127.0.0.1` |
+| 端口 | `DEMO_PORT=4180 "$repo/demo/start.sh"` | 默认 `4173`；只接受 `1..65535` 的十进制整数 |
+| runtime | `DEMO_RUNTIME_DIR=/absolute/demo-runtime "$repo/demo/start.sh"` | 默认是仓库内 `demo/.runtime`；相对路径以仓库根目录为基准；空白值被拒绝 |
 
 `start.sh` 不读取 `.env`，不 `source` 用户文件，也不继承 token、代理或其他任意环境变量。它只把 `PATH`、校验后的 `DEMO_PORT` 与明确的 `DEMO_RUNTIME_DIR` 交给 Node 服务。
 
@@ -61,10 +62,11 @@ demo/start.sh
 可只读核对：
 
 ```sh
-git -C demo/.runtime/repo status --short
-git -C demo/.runtime/repo log --oneline --decorate --all
-git -C demo/.runtime/repo diff main..agent/demo-discount-boundary
-node --test demo/.runtime/repo/test/*.test.mjs
+runtime=$repo/demo/.runtime
+git -C "$runtime/repo" status --short
+git -C "$runtime/repo" log --oneline --decorate --all
+git -C "$runtime/repo" diff main..agent/demo-discount-boundary
+node --test "$runtime/repo"/test/*.test.mjs
 ```
 
 ## 真实与模拟的边界
@@ -123,11 +125,31 @@ curl -sS -X POST -H 'content-type: application/json' -d '{}' "$base/api/merge"
 - **清理默认 runtime：** 先停止服务，确认路径，再执行下面的防误删检查。它只针对仓库内精确的 `demo/.runtime`，不适用于自定义 runtime。
 
 ```sh
-repo=$(git rev-parse --show-toplevel) || exit 1
-runtime=$repo/demo/.runtime
-[ "$runtime" = "$repo/demo/.runtime" ] || exit 1
-printf '将删除且仅删除：%s\n' "$runtime"
-[ -d "$runtime" ] && rm -r -- "$runtime"
+repo=/absolute/path/to/dsh-superagent
+case $repo in
+  /*) ;;
+  *) printf '拒绝：repo 必须是绝对路径\n' >&2; exit 1 ;;
+esac
+canonical_repo=$(CDPATH= cd -P "$repo" && pwd) || exit 1
+[ "$canonical_repo" = "$repo" ] || {
+  printf '拒绝：repo 不是 canonical path：%s\n' "$repo" >&2
+  exit 1
+}
+canonical_demo=$(CDPATH= cd -P "$canonical_repo/demo" && pwd) || exit 1
+[ "$canonical_demo" = "$canonical_repo/demo" ] || {
+  printf '拒绝：demo 目录越出仓库：%s\n' "$canonical_demo" >&2
+  exit 1
+}
+runtime=$canonical_demo/.runtime
+[ -d "$runtime" ] || { printf '无需清理：%s 不是目录\n' "$runtime"; exit 0; }
+canonical_runtime=$(CDPATH= cd -P "$runtime" && pwd) || exit 1
+[ "$canonical_runtime" = "$runtime" ] &&
+  [ "$canonical_runtime" = "$canonical_repo/demo/.runtime" ] || {
+    printf '拒绝：runtime 不是仓库内精确目标：%s\n' "$canonical_runtime" >&2
+    exit 1
+  }
+printf '将删除且仅删除：%s\n' "$canonical_runtime"
+rm -r -- "$canonical_runtime"
 ```
 
 不要对空变量、`~`、仓库根目录或通配符运行递归删除。自定义 runtime 应先打印绝对路径、确认其中只有本演示产物，再由操作员明确删除；启动和验收脚本不会替你清理它。
@@ -162,14 +184,15 @@ printf '将删除且仅删除：%s\n' "$runtime"
 自动验收：
 
 ```sh
-demo/verify.sh
+repo=/absolute/path/to/dsh-superagent
+"$repo/demo/verify.sh"
 ```
 
 完成后应看到 fixture test file 数、全部 `demo/tests/*.test.mjs` file 数、syntax file 数、Git whitespace check，以及 `Verification complete`。脚本运行 `git diff --check`，但**不会**要求整个工作树 clean，也不运行 pnpm/npm 或访问网络。
 
 人工验收清单：
 
-- 从仓库外 cwd 运行 `demo/start.sh`，打印的 URL 可访问，runtime 仍落在明确目录。
+- 从仓库外 cwd 运行 `"$repo/demo/start.sh"`，打印的 URL 可访问，runtime 仍落在明确目录。
 - 七步完成后只有一个 Ticket、一个 Session、一个 branch、两个 worker commits，tests 为 green。
 - 刷新和 recover 后 Ticket/branch/commits 不变，timeline 多一个 recovery event。
 - patch 与 runtime repo 的 `git diff main..agent/demo-discount-boundary` 一致。

@@ -49,9 +49,9 @@ case $DEMO_RUNTIME_DIR in
 esac
 
 PATH_VALUE=${PATH-}
-URL=http://127.0.0.1:$DEMO_PORT
 
-printf 'SuperAgent demo URL: %s\n' "$URL"
+cd "$REPO_DIR" || fail 'cannot enter the repository directory'
+
 printf 'Mode: 本地实战模式（生命周期模拟；Git/test/commit/patch 真实）\n'
 printf 'Runtime: %s\n' "$DEMO_RUNTIME_DIR"
 printf 'Stop: Ctrl+C\n'
