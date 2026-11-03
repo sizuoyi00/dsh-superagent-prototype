@@ -24,10 +24,10 @@ const issue = {
 
 const firstResult = {
   branch: 'agent/demo-discount-boundary',
-  commit: {
-    sha: '1111111',
-    subject: 'fix: handle a 100% discount',
-  },
+  commits: [{
+    hash: '1111111',
+    message: 'fix: handle a 100% discount',
+  }],
   completedAt: '2026-11-03T01:02:00.000Z',
   files: ['src/discount.mjs', 'test/discount.test.mjs'],
   patch: 'demo patch',
@@ -37,22 +37,22 @@ const firstResult = {
     url: 'http://127.0.0.1/local-pr/1',
   },
   tests: {
-    passed: true,
+    ok: true,
     summary: '2 tests passed',
   },
 }
 
 const followUpResult = {
   branch: 'agent/demo-discount-boundary',
-  commit: {
-    sha: '2222222',
-    subject: 'fix: reject non-finite discounts',
-  },
+  commits: [{
+    hash: '2222222',
+    message: 'fix: reject non-finite discounts',
+  }],
   completedAt: '2026-11-03T01:05:00.000Z',
   files: ['src/discount.mjs', 'test/discount.test.mjs'],
   patch: 'follow-up patch',
   tests: {
-    passed: true,
+    ok: true,
     summary: '4 tests passed',
   },
 }
@@ -201,7 +201,7 @@ describe('assignment lifecycle', () => {
     assert.deepEqual(running, runningSnapshot)
     assert.equal(awaitingReview.phase, 'awaiting_review')
     assert.equal(awaitingReview.tickets[0].status, 'awaiting_review')
-    assert.deepEqual(awaitingReview.tickets[0].commits, [firstResult.commit])
+    assert.deepEqual(awaitingReview.tickets[0].commits, firstResult.commits)
     assert.equal(awaitingReview.assignments[0].status, 'completed')
     assert.equal(awaitingReview.assignments[0].result.patch, firstResult.patch)
     assert.equal(awaitingReview.threads.length, 2)
@@ -219,6 +219,35 @@ describe('assignment lifecycle', () => {
       () => completeAssignment(queued, firstResult),
       (error) => error instanceof ConflictError && error.action === 'completeAssignment',
     )
+  })
+
+  it('rejects invalid worker success evidence without changing running state', () => {
+    const running = startAssignment(receiveIssue(createState(), issue))
+    const runningSnapshot = structuredClone(running)
+    const validResult = {
+      branch: 'agent/demo-discount-boundary',
+      commits: [{ hash: 'abc1234', message: 'fix: valid evidence' }],
+      patch: '',
+      tests: { ok: true },
+    }
+    const invalidResults = [
+      {},
+      { ...validResult, branch: ' ' },
+      { ...validResult, commits: [] },
+      { ...validResult, commits: [{ hash: '', message: 'fix: missing hash' }] },
+      { ...validResult, commits: [{ hash: 'abc1234', message: ' ' }] },
+      { ...validResult, tests: { ok: false } },
+      { ...validResult, patch: null },
+    ]
+
+    for (const invalidResult of invalidResults) {
+      assert.throws(
+        () => completeAssignment(running, invalidResult),
+        (error) => error?.name === 'ValidationError'
+          && error.code === 'VALIDATION_ERROR',
+      )
+      assert.deepEqual(running, runningSnapshot)
+    }
   })
 })
 
@@ -311,6 +340,41 @@ describe('durable recovery', () => {
       (error) => error instanceof ConflictError && error.action === 'recoverState',
     )
   })
+
+  it('interrupts a lost running Assignment and requeues the same Ticket', () => {
+    const running = startAssignment(receiveIssue(createState(), issue), {
+      startedAt: '2026-11-03T01:01:00.000Z',
+    })
+    const runningSnapshot = structuredClone(running)
+    const originalTicket = running.tickets[0]
+
+    const recovered = recoverState(running, {
+      recoveredAt: '2026-11-03T01:02:00.000Z',
+    })
+
+    assert.deepEqual(running, runningSnapshot)
+    assert.equal(recovered.phase, 'queued')
+    assert.equal(recovered.tickets.length, 1)
+    assert.equal(recovered.tickets[0].id, originalTicket.id)
+    assert.equal(recovered.tickets[0].branch, originalTicket.branch)
+    assert.equal(recovered.tickets[0].sessionId, originalTicket.sessionId)
+    assert.equal(recovered.tickets[0].status, 'queued')
+    assert.equal(recovered.assignments.length, 1)
+    assert.equal(recovered.assignments[0].status, 'interrupted')
+    assert.equal(recovered.assignments[0].interruptedAt, '2026-11-03T01:02:00.000Z')
+    assert.equal(recovered.timeline.at(-1).type, 'state.recovered')
+
+    const resumed = startAssignment(recovered, {
+      startedAt: '2026-11-03T01:03:00.000Z',
+    })
+    assert.equal(resumed.tickets.length, 1)
+    assert.equal(resumed.assignments.length, 2)
+    assert.equal(resumed.assignments[0].status, 'interrupted')
+    assert.equal(resumed.assignments[1].status, 'running')
+    assert.equal(resumed.assignments[1].ticketId, originalTicket.id)
+    assert.equal(resumed.assignments[1].branch, originalTicket.branch)
+    assert.equal(resumed.assignments[1].sessionId, originalTicket.sessionId)
+  })
 })
 
 describe('visible failure', () => {
@@ -375,8 +439,8 @@ describe('Ticket completion', () => {
     assert.equal(secondReview.tickets[0].branch, firstReview.tickets[0].branch)
     assert.equal(secondReview.tickets[0].sessionId, firstReview.tickets[0].sessionId)
     assert.deepEqual(secondReview.tickets[0].commits, [
-      firstResult.commit,
-      followUpResult.commit,
+      ...firstResult.commits,
+      ...followUpResult.commits,
     ])
 
     const reviewSnapshot = structuredClone(secondReview)
@@ -414,7 +478,10 @@ describe('boundary defaults', () => {
 
     const running = startAssignment(queued)
     const firstReview = completeAssignment(running, {
-      commits: [{ sha: '3333333', subject: 'test: grouped commits' }],
+      branch: 'agent/demo-discount-boundary',
+      commits: [{ hash: '3333333', message: 'test: grouped commits' }],
+      patch: '',
+      tests: { ok: true },
     })
     assert.equal(firstReview.threads[1].externalId, 'local-ticket-1')
     assert.equal(firstReview.threads[1].url, null)
@@ -424,9 +491,14 @@ describe('boundary defaults', () => {
     assert.equal(followUpQueued.triggers[1].body, 'retry')
 
     const followUpRunning = startAssignment(followUpQueued)
-    const secondReview = completeAssignment(followUpRunning)
+    const secondReview = completeAssignment(followUpRunning, {
+      branch: 'agent/demo-discount-boundary',
+      commits: [{ hash: '4444444', message: 'fix: follow-up' }],
+      patch: '',
+      tests: { ok: true },
+    })
     assert.equal(secondReview.threads.length, 2)
-    assert.equal(secondReview.tickets[0].commits.length, 1)
+    assert.equal(secondReview.tickets[0].commits.length, 2)
 
     const recovered = recoverState(secondReview)
     const merged = mergeTicket(recovered)
@@ -444,14 +516,25 @@ describe('boundary defaults', () => {
 
     const fromObject = failAssignment(running, {
       code: 7,
-      message: 'worker exited',
-      name: 'WorkerError',
+      message: '  worker exited  ',
+      name: '  WorkerError  ',
       stack: 'must not persist',
     })
     assert.deepEqual(fromObject.assignments[0].error, {
       name: 'WorkerError',
       message: 'worker exited',
       code: '7',
+    })
+
+    const fromMalformed = failAssignment(running, {
+      code: 0,
+      message: 42,
+      name: 17,
+    })
+    assert.deepEqual(fromMalformed.assignments[0].error, {
+      name: 'Error',
+      message: 'Assignment failed',
+      code: '0',
     })
 
     const fromEmpty = failAssignment(running)

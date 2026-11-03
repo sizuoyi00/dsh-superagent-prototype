@@ -11,6 +11,15 @@ export class ConflictError extends Error {
   }
 }
 
+export class ValidationError extends Error {
+  constructor(field, message) {
+    super(message)
+    this.name = 'ValidationError'
+    this.code = 'VALIDATION_ERROR'
+    this.field = field
+  }
+}
+
 function deepFreeze(value) {
   if (value === null || typeof value !== 'object' || Object.isFrozen(value)) {
     return value
@@ -44,6 +53,44 @@ function requiredString(value, fieldName) {
   return value.trim()
 }
 
+function workerResultString(value, fieldName) {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new ValidationError(fieldName, `${fieldName} must be a non-empty string`)
+  }
+  return value.trim()
+}
+
+function validateWorkerResult(resultInput) {
+  if (resultInput === null || typeof resultInput !== 'object') {
+    throw new ValidationError('result', 'result must be an object')
+  }
+
+  const branch = workerResultString(resultInput.branch, 'result.branch')
+  if (!Array.isArray(resultInput.commits) || resultInput.commits.length === 0) {
+    throw new ValidationError(
+      'result.commits',
+      'result.commits must contain at least one commit',
+    )
+  }
+  const commits = resultInput.commits.map((commit, index) => ({
+    ...commit,
+    hash: workerResultString(commit?.hash, `result.commits[${index}].hash`),
+    message: workerResultString(commit?.message, `result.commits[${index}].message`),
+  }))
+  if (resultInput.tests?.ok !== true) {
+    throw new ValidationError('result.tests.ok', 'result.tests.ok must be true')
+  }
+  if (typeof resultInput.patch !== 'string') {
+    throw new ValidationError('result.patch', 'result.patch must be a string')
+  }
+
+  return {
+    ...resultInput,
+    branch,
+    commits,
+  }
+}
+
 function appendEvent(state, type, at, details = {}) {
   const sequence = state.timeline.length + 1
   return [
@@ -59,20 +106,30 @@ function appendEvent(state, type, at, details = {}) {
 }
 
 function normalizeFailure(failureInput) {
-  const message = failureInput instanceof Error
+  const rawMessage = failureInput instanceof Error
     ? failureInput.message
     : typeof failureInput === 'string'
       ? failureInput
       : failureInput?.message
 
+  const rawName = failureInput instanceof Error
+    ? failureInput.name
+    : failureInput?.name
+  const name = typeof rawName === 'string' && rawName.trim().length > 0
+    ? rawName.trim()
+    : 'Error'
+  const message = typeof rawMessage === 'string' && rawMessage.trim().length > 0
+    ? rawMessage.trim()
+    : 'Assignment failed'
+  const hasCode = failureInput !== null
+    && typeof failureInput === 'object'
+    && failureInput.code !== undefined
+    && failureInput.code !== null
+
   return {
-    name: failureInput instanceof Error
-      ? failureInput.name
-      : failureInput?.name ?? 'Error',
-    message: typeof message === 'string' && message.length > 0
-      ? message
-      : 'Assignment failed',
-    ...(failureInput?.code ? { code: String(failureInput.code) } : {}),
+    name,
+    message,
+    ...(hasCode ? { code: String(failureInput.code) } : {}),
   }
 }
 
@@ -220,7 +277,7 @@ export function startAssignment(state, optionsInput = {}) {
 
 export function completeAssignment(state, resultInput = {}) {
   assertPhase(state, 'completeAssignment', ['running'])
-  const result = clone(resultInput)
+  const result = validateWorkerResult(clone(resultInput))
   const at = result.completedAt ?? new Date().toISOString()
   const ticket = state.tickets.at(-1)
   const assignment = state.assignments.at(-1)
@@ -230,11 +287,7 @@ export function completeAssignment(state, resultInput = {}) {
     completedAt: at,
     result,
   }
-  const commits = result.commits
-    ? [...ticket.commits, ...result.commits]
-    : result.commit
-      ? [...ticket.commits, result.commit]
-      : [...ticket.commits]
+  const commits = [...ticket.commits, ...result.commits]
   const existingPullRequestThread = state.threads.find((thread) => (
     thread.kind === 'pull-request' && thread.ticketIds.includes(ticket.id)
   ))
@@ -334,11 +387,30 @@ export function recoverState(state, optionsInput = {}) {
   ])
   const options = clone(optionsInput)
   const at = options.recoveredAt ?? new Date().toISOString()
+  const ticket = state.tickets.at(-1)
+  const isRunning = state.phase === 'running'
+  const assignment = isRunning ? state.assignments.at(-1) : null
 
   return finalize({
     ...state,
+    phase: isRunning ? 'queued' : state.phase,
+    tickets: isRunning
+      ? state.tickets.map((candidate) => (
+        candidate.id === ticket.id
+          ? { ...candidate, status: 'queued' }
+          : candidate
+      ))
+      : state.tickets,
+    assignments: isRunning
+      ? state.assignments.map((candidate) => (
+        candidate.id === assignment.id
+          ? { ...candidate, status: 'interrupted', interruptedAt: at }
+          : candidate
+      ))
+      : state.assignments,
     timeline: appendEvent(state, 'state.recovered', at, {
-      ticketId: state.tickets.at(-1).id,
+      ticketId: ticket.id,
+      ...(assignment ? { interruptedAssignmentId: assignment.id } : {}),
     }),
   })
 }
