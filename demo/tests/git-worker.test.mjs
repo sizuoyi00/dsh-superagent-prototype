@@ -1,8 +1,18 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
+import {
+  cp,
+  lstat,
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  symlink,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 import {
@@ -14,6 +24,9 @@ import { ProcessError, runProcess } from '../src/process.mjs';
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const fixtureDirectory = resolve(testDirectory, '../fixture');
+const gitWorkerModuleUrl = pathToFileURL(
+  resolve(testDirectory, '../src/git-worker.mjs'),
+).href;
 const temporaryDirectories = [];
 const { NODE_TEST_CONTEXT: ignoredTestContext, ...testEnvironment } = process.env;
 
@@ -136,6 +149,87 @@ test('initialization creates an isolated repository and safely rejects repetitio
   await assert.rejects(worker.initialize(), GitWorkerError);
 });
 
+test('initialization rejects fixture symlinks before copying the repository', async () => {
+  const rootDirectory = await createTemporaryDirectory();
+  const fixtureCopy = join(rootDirectory, 'fixture copy');
+  const repositoryDirectory = join(rootDirectory, 'runtime repository');
+  const externalFile = join(rootDirectory, 'outside-discount.mjs');
+  const externalContent = 'export const outside = true;\n';
+  await cp(fixtureDirectory, fixtureCopy, { recursive: true });
+  await writeFile(externalFile, externalContent, 'utf8');
+  await unlink(join(fixtureCopy, 'src/discount.mjs'));
+  await symlink(externalFile, join(fixtureCopy, 'src/discount.mjs'));
+  const worker = new GitWorker({
+    fixtureDir: fixtureCopy,
+    repoDir: repositoryDirectory,
+  });
+
+  await assert.rejects(worker.initialize(), /symbolic link/i);
+  assert.equal(await readFile(externalFile, 'utf8'), externalContent);
+  await assert.rejects(lstat(repositoryDirectory), { code: 'ENOENT' });
+});
+
+test('assignment rejects a runtime symlink without changing its external target', async () => {
+  const rootDirectory = await createTemporaryDirectory();
+  const repositoryDirectory = join(rootDirectory, 'runtime repository');
+  const externalFile = join(rootDirectory, 'outside-discount.mjs');
+  const externalContent = await readFile(
+    join(fixtureDirectory, 'src/discount.mjs'),
+    'utf8',
+  );
+  const worker = new GitWorker({
+    fixtureDir: fixtureDirectory,
+    repoDir: repositoryDirectory,
+  });
+  await worker.initialize();
+  await writeFile(externalFile, externalContent, 'utf8');
+  await unlink(join(repositoryDirectory, 'src/discount.mjs'));
+  await symlink(externalFile, join(repositoryDirectory, 'src/discount.mjs'));
+
+  await assert.rejects(worker.runAssignment('initial'), /symbolic link/i);
+  assert.equal(await readFile(externalFile, 'utf8'), externalContent);
+});
+
+test('initialization ignores Git environment variables that redirect side effects', async () => {
+  const rootDirectory = await createTemporaryDirectory();
+  const repositoryDirectory = join(rootDirectory, 'runtime repository');
+  const externalGitDirectory = join(rootDirectory, 'outside.git');
+  const externalWorkTree = join(rootDirectory, 'outside worktree');
+  const externalSentinel = join(externalWorkTree, 'sentinel.txt');
+  await mkdir(externalWorkTree);
+  await writeFile(externalSentinel, 'do not change\n', 'utf8');
+
+  const childSource = `
+    import { GitWorker } from ${JSON.stringify(gitWorkerModuleUrl)};
+    const [fixtureDir, repoDir] = process.argv.slice(1);
+    const worker = new GitWorker({ fixtureDir, repoDir });
+    await worker.initialize();
+  `;
+  const result = await runProcess(
+    process.execPath,
+    [
+      '--input-type=module',
+      '--eval',
+      childSource,
+      fixtureDirectory,
+      repositoryDirectory,
+    ],
+    {
+      cwd: rootDirectory,
+      env: {
+        ...testEnvironment,
+        GIT_DIR: externalGitDirectory,
+        GIT_WORK_TREE: externalWorkTree,
+      },
+    },
+  );
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal((await lstat(join(repositoryDirectory, '.git'))).isDirectory(), true);
+  await assert.rejects(lstat(externalGitDirectory), { code: 'ENOENT' });
+  assert.equal(await readFile(externalSentinel, 'utf8'), 'do not change\n');
+});
+
 test('assignments demonstrate two real red-green cycles on one clean branch', async () => {
   const rootDirectory = await createTemporaryDirectory();
   const repositoryDirectory = join(rootDirectory, 'runtime repository with spaces');
@@ -166,7 +260,12 @@ test('assignments demonstrate two real red-green cycles on one clean branch', as
     'test/discount.test.mjs',
   ]);
   assert.match(first.patch, /discountPercent > 100/);
-  assert.doesNotMatch(first.patch, new RegExp(repositoryDirectory));
+  const serializedFirstResult = JSON.stringify(first);
+  assert.equal(serializedFirstResult.includes(repositoryDirectory), false);
+  assert.equal(
+    serializedFirstResult.includes(pathToFileURL(repositoryDirectory).href),
+    false,
+  );
   assert.equal(firstStatus.stdout, '');
 
   const second = await worker.runAssignment('follow-up');
@@ -205,7 +304,12 @@ test('assignments demonstrate two real red-green cycles on one clean branch', as
   ]);
   assert.match(second.patch, /Number\.isFinite/);
   assert.match(second.patch, /NaN and positive or negative Infinity/);
-  assert.doesNotMatch(second.patch, new RegExp(repositoryDirectory));
+  const serializedSecondResult = JSON.stringify(second);
+  assert.equal(serializedSecondResult.includes(repositoryDirectory), false);
+  assert.equal(
+    serializedSecondResult.includes(pathToFileURL(repositoryDirectory).href),
+    false,
+  );
   assert.equal(secondStatus.stdout, '');
   assert.equal(finalSuite.code, 0);
 

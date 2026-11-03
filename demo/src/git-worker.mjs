@@ -1,5 +1,14 @@
-import { cp, lstat, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import {
+  cp,
+  lstat,
+  mkdir,
+  readdir,
+  readFile,
+  realpath,
+  writeFile,
+} from 'node:fs/promises';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { ProcessError, runProcess } from './process.mjs';
 
@@ -13,6 +22,9 @@ const IMPLEMENTATION_FILE = 'src/discount.mjs';
 const README_FILE = 'README.md';
 const TEST_COMMAND = 'node --test';
 const { NODE_TEST_CONTEXT: ignoredTestContext, ...TEST_ENVIRONMENT } = process.env;
+const GIT_ENVIRONMENT = Object.fromEntries(
+  Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')),
+);
 
 const FIRST_REGRESSION_TEST = `test('returns zero for a 100 percent discount', () => {
   assert.equal(applyDiscount(80, 100), 0);
@@ -71,6 +83,43 @@ function combineOutput(result) {
     .join('\n');
 }
 
+function sanitizeResult(value, repoDir) {
+  if (typeof value === 'string') {
+    return value
+      .split(pathToFileURL(repoDir).href)
+      .join('<repo>')
+      .split(repoDir)
+      .join('<repo>');
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeResult(item, repoDir));
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        sanitizeResult(item, repoDir),
+      ]),
+    );
+  }
+  return value;
+}
+
+async function assertTreeHasNoSymbolicLinks(treePath) {
+  const metadata = await lstat(treePath);
+  if (metadata.isSymbolicLink()) {
+    throw new GitWorkerError(`Symbolic link is not allowed: ${treePath}`);
+  }
+  if (!metadata.isDirectory()) return;
+
+  const entries = await readdir(treePath);
+  await Promise.all(
+    entries.map((entry) =>
+      assertTreeHasNoSymbolicLinks(resolve(treePath, entry)),
+    ),
+  );
+}
+
 export class GitWorker {
   #fixtureDir;
   #repoDir;
@@ -106,6 +155,7 @@ export class GitWorker {
     this.#stage = 'initializing';
     try {
       await this.#assertRepositoryDoesNotExist();
+      await assertTreeHasNoSymbolicLinks(this.#fixtureDir);
       await mkdir(dirname(this.#repoDir), { recursive: true });
       await cp(this.#fixtureDir, this.#repoDir, {
         recursive: true,
@@ -162,6 +212,7 @@ export class GitWorker {
   }
 
   async #runInitialAssignment() {
+    await this.#assertSafeWriteTargets([TEST_FILE, IMPLEMENTATION_FILE]);
     await this.#git(['checkout', '-b', ASSIGNMENT_BRANCH]);
     await this.#appendToFile(TEST_FILE, FIRST_REGRESSION_TEST);
     const redResult = await this.#runTests();
@@ -179,6 +230,11 @@ export class GitWorker {
   }
 
   async #runFollowUpAssignment() {
+    await this.#assertSafeWriteTargets([
+      TEST_FILE,
+      IMPLEMENTATION_FILE,
+      README_FILE,
+    ]);
     await this.#appendToFile(TEST_FILE, FOLLOW_UP_REGRESSION_TEST);
     const redResult = await this.#runTests();
     this.#requireRed(redResult, 'non-finite inputs');
@@ -224,15 +280,51 @@ export class GitWorker {
 
   async #appendToFile(relativePath, section) {
     const filePath = this.#repositoryPath(relativePath);
+    await this.#assertSafeWritePath(filePath);
     const source = await readFile(filePath, 'utf8');
+    await this.#assertSafeWritePath(filePath);
     await writeFile(filePath, appendSection(source, section), 'utf8');
   }
 
   async #replaceInFile(relativePath, original, replacement) {
     const filePath = this.#repositoryPath(relativePath);
+    await this.#assertSafeWritePath(filePath);
     const source = await readFile(filePath, 'utf8');
     const updatedSource = replaceOnce(source, original, replacement, relativePath);
+    await this.#assertSafeWritePath(filePath);
     await writeFile(filePath, updatedSource, 'utf8');
+  }
+
+  async #assertSafeWriteTargets(relativePaths) {
+    await Promise.all(
+      relativePaths.map((relativePath) =>
+        this.#assertSafeWritePath(this.#repositoryPath(relativePath)),
+      ),
+    );
+  }
+
+  async #assertSafeWritePath(filePath) {
+    const realRepositoryDirectory = await realpath(this.#repoDir);
+    if (realRepositoryDirectory !== this.#repoDir) {
+      throw new GitWorkerError('Runtime repository path contains a symbolic link');
+    }
+
+    const pathFromRepository = relative(this.#repoDir, filePath);
+    let currentPath = this.#repoDir;
+    for (const component of pathFromRepository.split(sep)) {
+      currentPath = resolve(currentPath, component);
+      const metadata = await lstat(currentPath);
+      if (metadata.isSymbolicLink()) {
+        throw new GitWorkerError(
+          `Symbolic link is not allowed in runtime repository: ${currentPath}`,
+        );
+      }
+    }
+
+    const realParentDirectory = await realpath(dirname(filePath));
+    if (!isWithin(realRepositoryDirectory, realParentDirectory)) {
+      throw new GitWorkerError('Runtime write target escapes the repository');
+    }
   }
 
   #repositoryPath(relativePath) {
@@ -304,18 +396,21 @@ export class GitWorker {
       });
     const files = filesResult.stdout.trim().split('\n').filter(Boolean).sort();
 
-    return {
-      branch: ASSIGNMENT_BRANCH,
-      commits,
-      tests: {
-        ok: true,
-        command: TEST_COMMAND,
-        output: combineOutput(greenResult),
-        redEvidence: `exit code: ${redResult.code}\n${combineOutput(redResult)}`,
+    return sanitizeResult(
+      {
+        branch: ASSIGNMENT_BRANCH,
+        commits,
+        tests: {
+          ok: true,
+          command: TEST_COMMAND,
+          output: combineOutput(greenResult),
+          redEvidence: `exit code: ${redResult.code}\n${combineOutput(redResult)}`,
+        },
+        patch: patchResult.stdout,
+        files,
       },
-      patch: patchResult.stdout,
-      files,
-    };
+      this.#repoDir,
+    );
   }
 
   async #git(args) {
@@ -324,6 +419,7 @@ export class GitWorker {
       timeoutMs: 30_000,
       maxOutputBytes: 1_048_576,
       rejectOnNonZero: true,
+      env: GIT_ENVIRONMENT,
     });
   }
 
