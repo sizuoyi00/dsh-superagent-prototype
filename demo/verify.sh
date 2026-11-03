@@ -31,16 +31,9 @@ if ! env -i PATH="$PATH_VALUE" "$NODE_BIN" -e '
 fi
 
 run_node_tests() {
-  if [ "${DEMO_VERIFY_NESTED-}" = 1 ]; then
-    env -i \
-      PATH="$PATH_VALUE" \
-      DEMO_VERIFY_NESTED=1 \
-      "$NODE_BIN" --test --test-reporter=tap "$@"
-  else
-    env -i \
-      PATH="$PATH_VALUE" \
-      "$NODE_BIN" --test --test-reporter=tap "$@"
-  fi
+  env -i \
+    PATH="$PATH_VALUE" \
+    "$NODE_BIN" --test --test-reporter=tap "$@"
 }
 
 run_test_suite() {

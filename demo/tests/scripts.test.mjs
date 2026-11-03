@@ -59,6 +59,76 @@ exit 99
   return binaryDirectory;
 }
 
+async function createRecordingVerifyNode(t) {
+  const binaryDirectory = await createTemporaryDirectory(t, 'superagent-recording-node-');
+  const callsPath = join(binaryDirectory, 'calls.log');
+  const nodePath = join(binaryDirectory, 'node');
+  const source = `#!/bin/sh
+set -eu
+
+if [ "\${NODE_OPTIONS+x}" = x ] ||
+  [ "\${NODE_TEST_CONTEXT+x}" = x ] ||
+  [ "\${NODE_V8_COVERAGE+x}" = x ] ||
+  [ "\${DEMO_VERIFY_NESTED+x}" = x ]; then
+  printf 'sensitive environment reached fake node\\n' >&2
+  exit 90
+fi
+
+case \${1-} in
+  -e)
+    [ "$#" -eq 2 ] || exit 91
+    printf 'version\\n' >> '${callsPath}'
+    exit 0
+    ;;
+  --check)
+    [ "$#" -eq 2 ] || exit 92
+    printf 'check\\n' >> '${callsPath}'
+    exit 0
+    ;;
+  --test)
+    [ "\${2-}" = '--test-reporter=tap' ] || exit 93
+    shift 2
+    case \${1-} in
+      */fixture/test/*.test.mjs)
+        suite=fixture
+        expected=4
+        pattern='*/fixture/test/*.test.mjs'
+        ;;
+      */tests/*.test.mjs)
+        suite=demo
+        expected=153
+        pattern='*/tests/*.test.mjs'
+        ;;
+      *) exit 94 ;;
+    esac
+    for test_file in "$@"; do
+      case $test_file in
+        $pattern) ;;
+        *) exit 95 ;;
+      esac
+    done
+    printf 'tests %s %s\\n' "$suite" "$#" >> '${callsPath}'
+    printf '%s\\n' \\
+      'TAP version 13' \\
+      "1..$expected" \\
+      "# tests $expected" \\
+      '# suites 0' \\
+      "# pass $expected" \\
+      '# fail 0' \\
+      '# cancelled 0' \\
+      '# skipped 0' \\
+      '# todo 0'
+    exit 0
+    ;;
+esac
+printf 'unexpected fake node arguments\\n' >&2
+exit 99
+`;
+  await writeFile(nodePath, source, 'utf8');
+  await chmod(nodePath, 0o755);
+  return { binaryDirectory, callsPath };
+}
+
 function extractCleanupSnippet(source) {
   const match = source.match(
     /- \*\*清理默认 runtime：\*\*[\s\S]*?```sh\n([\s\S]*?)\n```/,
@@ -168,6 +238,7 @@ test('start contract validates explicit environment and execs the server safely'
   const source = await readFile(startScript, 'utf8');
   assert.match(source, /DEMO_PORT/);
   assert.match(source, /DEMO_RUNTIME_DIR/);
+  assert.match(source, /if ! env -i PATH="\$PATH_VALUE" "\$NODE_BIN" -e/);
   assert.match(source, /exec\s+env\s+-i/);
   assert.match(source, /src\/server\.mjs/);
   assert.doesNotMatch(source, /\beval\b/);
@@ -183,27 +254,22 @@ test('verify contract runs fixture, demo, syntax, and whitespace checks without 
   assert.match(source, /EXPECTED_DEMO_TESTS=153/);
   assert.match(source, /env\s+-i/);
   assert.match(source, /--test-reporter=tap/);
-  assert.match(
-    source,
-    /if \[ "\$\{DEMO_VERIFY_NESTED-\}" = 1 \]; then/,
-  );
+  assert.doesNotMatch(source, /DEMO_VERIFY_NESTED/);
   assert.match(source, /--check/);
   assert.match(source, /git\s+-C\s+"\$REPO_DIR"\s+diff\s+--check/);
   assert.doesNotMatch(source, /\b(?:npm|pnpm|yarn|bun|curl|wget)\b/);
 });
 
 test('verify succeeds from a different working directory', async (t) => {
-  if (process.env.DEMO_VERIFY_NESTED === '1') {
-    assert.equal(process.env.DEMO_VERIFY_NESTED, '1');
-    return;
-  }
   const workingDirectory = await createTemporaryDirectory(t, 'superagent-verify-cwd-');
+  const { binaryDirectory, callsPath } = await createRecordingVerifyNode(t);
   const result = runScript(verifyScript, {
     cwd: workingDirectory,
     env: {
       ...process.env,
+      PATH: `${binaryDirectory}:${process.env.PATH}`,
       DEMO_VERIFY_NESTED: '1',
-      NODE_OPTIONS: '--definitely-invalid-superagent-option',
+      NODE_OPTIONS: '--test-only',
       NODE_TEST_CONTEXT: 'child-v8',
       NODE_V8_COVERAGE: join(workingDirectory, 'unexpected-coverage'),
     },
@@ -216,6 +282,13 @@ test('verify succeeds from a different working directory', async (t) => {
   assert.match(result.stdout, /Syntax checks:\s+\d+ file/);
   assert.match(result.stdout, /Verification complete:/);
   assert.deepEqual(await readdir(workingDirectory), []);
+  const calls = (await readFile(callsPath, 'utf8')).trim().split('\n');
+  assert.equal(calls.filter((call) => call === 'version').length, 1);
+  assert.deepEqual(
+    calls.filter((call) => call.startsWith('tests ')),
+    ['tests fixture 1', 'tests demo 9'],
+  );
+  assert.equal(calls.filter((call) => call === 'check').length, 9);
 });
 
 test('verify rejects wrong inventory and every non-passing TAP outcome', async (t) => {
@@ -288,9 +361,18 @@ test('start launches from a different cwd and writes only to the configured runt
   assert.equal(await readFile(sentinelPath, 'utf8'), 'unchanged\n');
 });
 
-test('start rejects a blank port without changing a sentinel', async (t) => {
+test('start sanitizes Node preflight before rejecting a blank port', async (t) => {
   const workingDirectory = await createTemporaryDirectory(t, 'superagent-empty-port-');
+  const injectionDirectory = await createTemporaryDirectory(t, 'superagent-node-options-');
   const sentinelPath = join(workingDirectory, 'sentinel.txt');
+  const injectedMarkerPath = join(workingDirectory, 'node-options-ran.txt');
+  const coveragePath = join(workingDirectory, 'unexpected-coverage');
+  const injectionPath = join(injectionDirectory, 'inject.cjs');
+  await writeFile(
+    injectionPath,
+    `require('node:fs').writeFileSync(${JSON.stringify(injectedMarkerPath)}, 'ran\\n');\n`,
+    'utf8',
+  );
   await writeFile(sentinelPath, 'unchanged\n', 'utf8');
   const result = runScript(startScript, {
     cwd: workingDirectory,
@@ -298,6 +380,9 @@ test('start rejects a blank port without changing a sentinel', async (t) => {
       ...process.env,
       DEMO_PORT: '',
       DEMO_RUNTIME_DIR: join(workingDirectory, 'runtime'),
+      NODE_OPTIONS: `--require=${injectionPath}`,
+      NODE_TEST_CONTEXT: 'child-v8',
+      NODE_V8_COVERAGE: coveragePath,
     },
     timeout: 5_000,
   });
@@ -306,6 +391,8 @@ test('start rejects a blank port without changing a sentinel', async (t) => {
   assert.match(result.stderr, /DEMO_PORT/);
   assert.deepEqual(await readdir(workingDirectory), ['sentinel.txt']);
   assert.equal(await readFile(sentinelPath, 'utf8'), 'unchanged\n');
+  await assert.rejects(stat(injectedMarkerPath), { code: 'ENOENT' });
+  await assert.rejects(stat(coveragePath), { code: 'ENOENT' });
 });
 
 test('start rejects invalid or occupied ports without false readiness', async (t) => {

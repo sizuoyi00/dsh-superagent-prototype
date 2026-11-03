@@ -16,8 +16,9 @@ VERIFY_PATH=$SCRIPT_DIR/verify.sh
 NODE_BIN=$(command -v node) || fail 'node is required on PATH'
 command -v git >/dev/null 2>&1 || fail 'git is required on PATH'
 git --version >/dev/null 2>&1 || fail 'git is installed but cannot run'
+PATH_VALUE=${PATH-}
 
-if ! "$NODE_BIN" -e '
+if ! env -i PATH="$PATH_VALUE" "$NODE_BIN" -e '
   const [major, minor, patch] = process.versions.node.split(".").map(Number);
   const supported =
     Number.isInteger(major) &&
@@ -47,8 +48,6 @@ case $DEMO_RUNTIME_DIR in
   /*) ;;
   *) DEMO_RUNTIME_DIR=$REPO_DIR/$DEMO_RUNTIME_DIR ;;
 esac
-
-PATH_VALUE=${PATH-}
 
 cd "$REPO_DIR" || fail 'cannot enter the repository directory'
 
