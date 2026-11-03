@@ -60,12 +60,18 @@ function workerResultString(value, fieldName) {
   return value.trim()
 }
 
-function validateWorkerResult(resultInput) {
+function validateWorkerResult(resultInput, ticketBranch) {
   if (resultInput === null || typeof resultInput !== 'object') {
     throw new ValidationError('result', 'result must be an object')
   }
 
   const branch = workerResultString(resultInput.branch, 'result.branch')
+  if (resultInput.branch !== ticketBranch) {
+    throw new ValidationError(
+      'result.branch',
+      'result.branch must match the Ticket branch',
+    )
+  }
   if (!Array.isArray(resultInput.commits) || resultInput.commits.length === 0) {
     throw new ValidationError(
       'result.commits',
@@ -245,11 +251,16 @@ export function startAssignment(state, optionsInput = {}) {
   const options = clone(optionsInput)
   const at = options.startedAt ?? new Date().toISOString()
   const ticket = state.tickets.at(-1)
+  const previousAssignment = state.assignments.at(-1)
+  const isRecovery = previousAssignment?.ticketId === ticket.id
+    && previousAssignment.status === 'interrupted'
   const assignment = {
     id: `assignment-${state.assignments.length + 1}`,
     ticketId: ticket.id,
     triggerId: ticket.triggerIds.at(-1),
-    kind: state.assignments.length === 0 ? 'initial' : 'follow-up',
+    kind: isRecovery
+      ? 'recovery'
+      : state.assignments.length === 0 ? 'initial' : 'follow-up',
     status: 'running',
     branch: ticket.branch,
     sessionId: ticket.sessionId,
@@ -277,9 +288,9 @@ export function startAssignment(state, optionsInput = {}) {
 
 export function completeAssignment(state, resultInput = {}) {
   assertPhase(state, 'completeAssignment', ['running'])
-  const result = validateWorkerResult(clone(resultInput))
-  const at = result.completedAt ?? new Date().toISOString()
   const ticket = state.tickets.at(-1)
+  const result = validateWorkerResult(clone(resultInput), ticket.branch)
+  const at = result.completedAt ?? new Date().toISOString()
   const assignment = state.assignments.at(-1)
   const completedAssignment = {
     ...assignment,

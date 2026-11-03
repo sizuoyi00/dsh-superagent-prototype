@@ -249,6 +249,23 @@ describe('assignment lifecycle', () => {
       assert.deepEqual(running, runningSnapshot)
     }
   })
+
+  it('rejects worker evidence from a branch unrelated to the Ticket', () => {
+    const running = startAssignment(receiveIssue(createState(), issue))
+    const runningSnapshot = structuredClone(running)
+
+    assert.throws(
+      () => completeAssignment(running, {
+        ...firstResult,
+        branch: 'agent/unrelated-work',
+      }),
+      (error) => error?.name === 'ValidationError'
+        && error.code === 'VALIDATION_ERROR'
+        && error.field === 'result.branch',
+    )
+    assert.deepEqual(running, runningSnapshot)
+    assert.equal(running.phase, 'running')
+  })
 })
 
 describe('follow-up ownership', () => {
@@ -371,6 +388,7 @@ describe('durable recovery', () => {
     assert.equal(resumed.assignments.length, 2)
     assert.equal(resumed.assignments[0].status, 'interrupted')
     assert.equal(resumed.assignments[1].status, 'running')
+    assert.equal(resumed.assignments[1].kind, 'recovery')
     assert.equal(resumed.assignments[1].ticketId, originalTicket.id)
     assert.equal(resumed.assignments[1].branch, originalTicket.branch)
     assert.equal(resumed.assignments[1].sessionId, originalTicket.sessionId)
