@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  link,
   mkdir,
   mkdtemp,
   lstat,
@@ -446,6 +447,64 @@ test('maps a low-level StoreError without exposing its state path', async (t) =>
   });
   assert.equal(JSON.stringify(error).includes(harness.runtimeDir), false);
   assert.equal(JSON.stringify(error).includes(externalDirectory), false);
+});
+
+test('reset replaces a symbolic-link state entry without changing its target', async (t) => {
+  const harness = await createHarness(t);
+  const statePath = join(harness.runtimeDir, 'state.json');
+  const externalPath = join(harness.rootDirectory, 'external-state.json');
+  await writeFile(externalPath, 'external symlink target\n', 'utf8');
+  await symlink(externalPath, statePath);
+
+  const reset = await postJson(harness.baseUrl, '/api/reset');
+  const stateMetadata = await lstat(statePath);
+
+  assert.equal(reset.response.status, 200);
+  assert.equal(await readFile(externalPath, 'utf8'), 'external symlink target\n');
+  assert.equal(stateMetadata.isFile(), true);
+  assert.equal(stateMetadata.isSymbolicLink(), false);
+  assert.equal(stateMetadata.nlink, 1);
+  assert.deepEqual(JSON.parse(await readFile(statePath, 'utf8')), reset.value);
+});
+
+test('reset replaces a hard-linked state entry without changing its target', async (t) => {
+  const harness = await createHarness(t);
+  const statePath = join(harness.runtimeDir, 'state.json');
+  const externalPath = join(harness.rootDirectory, 'external-state.json');
+  await writeFile(externalPath, 'external hard-link target\n', 'utf8');
+  await link(externalPath, statePath);
+
+  const reset = await postJson(harness.baseUrl, '/api/reset');
+  const stateMetadata = await lstat(statePath);
+
+  assert.equal(reset.response.status, 200);
+  assert.equal(await readFile(externalPath, 'utf8'), 'external hard-link target\n');
+  assert.equal((await lstat(externalPath)).nlink, 1);
+  assert.equal(stateMetadata.isFile(), true);
+  assert.equal(stateMetadata.nlink, 1);
+  assert.deepEqual(JSON.parse(await readFile(statePath, 'utf8')), reset.value);
+});
+
+test('reset replaces a directory state entry without leaving the runtime tree', async (t) => {
+  const harness = await createHarness(t);
+  const statePath = join(harness.runtimeDir, 'state.json');
+  const externalPath = join(harness.rootDirectory, 'external-state.txt');
+  const runtimeSentinel = join(harness.runtimeDir, 'keep.txt');
+  await writeFile(externalPath, 'outside\n', 'utf8');
+  await writeFile(runtimeSentinel, 'inside\n', 'utf8');
+  await mkdir(statePath);
+  await writeFile(join(statePath, 'nested.txt'), 'nested\n', 'utf8');
+  await symlink(externalPath, join(statePath, 'external-link'));
+
+  const reset = await postJson(harness.baseUrl, '/api/reset');
+  const stateMetadata = await lstat(statePath);
+
+  assert.equal(reset.response.status, 200);
+  assert.equal(await readFile(externalPath, 'utf8'), 'outside\n');
+  assert.equal(await readFile(runtimeSentinel, 'utf8'), 'inside\n');
+  assert.equal(stateMetadata.isFile(), true);
+  assert.equal(stateMetadata.nlink, 1);
+  assert.deepEqual(JSON.parse(await readFile(statePath, 'utf8')), reset.value);
 });
 
 test('returns JSON 404 and endpoint-specific 405 responses', async (t) => {

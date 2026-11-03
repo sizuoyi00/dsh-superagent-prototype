@@ -515,30 +515,38 @@ export function createDemoServer({
   const runtimeGuard = initializeRuntimeDirectory(directories.runtimeDir);
   const initialState = createState();
   const stateFilePath = join(directories.runtimeDir, 'state.json');
-  const store = new JsonStore({
-    filePath: stateFilePath,
-    initialState,
-  });
+  const store = new JsonStore({ filePath: stateFilePath, initialState });
   const repoDir = join(directories.runtimeDir, 'repo');
   let currentState;
   let runInProgress = false;
   let worker;
 
-  async function assertSafeStateFile(operation) {
-    try {
-      const metadata = await lstat(stateFilePath);
-      if (
-        metadata.isSymbolicLink() ||
-        !metadata.isFile() ||
-        metadata.nlink !== 1
-      ) {
-        throw new StoreAccessError(operation);
-      }
-    } catch (error) {
-      if (error?.code === 'ENOENT') return;
-      if (error instanceof StoreAccessError) throw error;
+  async function readStateFileMetadata(operation) {
+    try { return await lstat(stateFilePath); } catch (error) {
+      if (error?.code === 'ENOENT') return undefined;
       throw new StoreAccessError(operation);
     }
+  }
+
+  async function assertSafeStateFile(operation) {
+    const metadata = await readStateFileMetadata(operation);
+    if (metadata && (metadata.isSymbolicLink() || !metadata.isFile() || metadata.nlink !== 1)) {
+      throw new StoreAccessError(operation);
+    }
+  }
+
+  async function removeUnsafeStateEntryForReset() {
+    runtimeGuard.refreshAfterControlledDirectoryChange();
+    const metadata = await readStateFileMetadata('reset');
+    runtimeGuard.verify();
+    if (!metadata || (metadata.isFile() && metadata.nlink === 1)) return;
+    try {
+      if (metadata.isDirectory()) await rm(stateFilePath, { recursive: true });
+      else await unlink(stateFilePath);
+    } catch {
+      throw new StoreAccessError('reset');
+    }
+    runtimeGuard.refreshAfterControlledDirectoryChange();
   }
 
   async function loadState() {
@@ -546,9 +554,7 @@ export function createDemoServer({
     await assertSafeStateFile('load');
     runtimeGuard.verify();
     let loadedState;
-    try {
-      loadedState = await store.load();
-    } catch {
+    try { loadedState = await store.load(); } catch {
       runtimeGuard.verify();
       throw new StoreAccessError('load');
     }
@@ -560,9 +566,7 @@ export function createDemoServer({
     runtimeGuard.verify();
     await assertSafeStateFile('persist');
     runtimeGuard.verify();
-    try {
-      await store.save(nextState);
-    } catch {
+    try { await store.save(nextState); } catch {
       runtimeGuard.verify();
       throw new StoreAccessError('persist');
     }
@@ -571,9 +575,7 @@ export function createDemoServer({
 
   async function getState() {
     runtimeGuard.verify();
-    if (currentState === undefined) {
-      currentState = await loadState();
-    }
+    if (currentState === undefined) currentState = await loadState();
     return currentState;
   }
 
@@ -608,11 +610,9 @@ export function createDemoServer({
   }
 
   async function resetDemo() {
+    await removeUnsafeStateEntryForReset();
     await prepareRuntimeRepository();
-    const nextWorker = new GitWorker({
-      fixtureDir: directories.fixtureDir,
-      repoDir,
-    });
+    const nextWorker = new GitWorker({ fixtureDir: directories.fixtureDir, repoDir });
     runtimeGuard.verify();
     await nextWorker.initialize();
     runtimeGuard.refreshAfterControlledDirectoryChange();
