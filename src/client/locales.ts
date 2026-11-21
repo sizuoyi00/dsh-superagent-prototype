@@ -32,6 +32,7 @@ const TEXT = {
   'source.feishu': ['飞书', 'Feishu'],
   'source.github': ['GitHub', 'GitHub'],
   'source.schedule': ['定时', 'Schedule'],
+  'source.im': ['企信', 'ShareCRM IM'],
   'source.github-issue': ['GitHub Issue', 'GitHub Issue'],
   'health.github': ['GitHub 来源', 'GitHub Source'],
   'health.feishu': ['飞书来源', 'Feishu Source'],

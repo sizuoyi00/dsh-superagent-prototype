@@ -13,6 +13,9 @@
     # Schedule Source: fires a fixed instruction on a cron expression once configured.
     - id: dsh-superagent-schedule
       name: dsh-superagent/schedule-watch
+    # ShareCRM IM Source: polls the configured sessions once a CLI is signed in on the host.
+    - id: dsh-superagent-im
+      name: dsh-superagent/im-watch
     # The agent preset of every Executor Session (WORKER_PRESET in src/app/sessions.ts); the main Session has its own, below.
     # It is DSH's `standard` preset with only what a worker needs, and a shell whose foreground command moves to a background job
     # after 5 seconds, so a long command does not hold back a person's message, which the Session takes at its next step. Left

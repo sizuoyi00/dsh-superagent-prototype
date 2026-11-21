@@ -1,0 +1,216 @@
+/** 企信 (ShareCRM IM) Source: polls configured sessions and turns their messages into Triggers, and replies through the same CLI. */
+import type { Context } from '@deepseek-ai/cordis'
+import { z } from 'zod'
+import { type OutboundMessage, type Trigger } from '../core/index.ts'
+import { CliError, validItems } from '../infra/commands.ts'
+import { checkedImText } from '../infra/text.ts'
+import { KV } from '../kv.ts'
+import { sourceContext, type SourceContext } from './host.ts'
+import { imQuote, imText, imTrigger, imThreadId, ImMessageSchema, ImSessionSchema, SOURCE, type ImMessage, type ImSelf } from './im-trigger.ts'
+import type { ContextMessage, SourceKind } from './kind.ts'
+import { pause } from './poll.ts'
+
+/** The 企信 CLI every call goes through; it is on the service's PATH and signed in as the agent's own account. */
+export const CLI = 'sharecrm'
+/** How long the loop sleeps before rereading its configuration when it is not polling. */
+const RECHECK_MS = 60_000
+/** How many descending pages one session may take per round, so a burst cannot hold the loop. */
+const MAX_PAGES = 10
+
+const ConfigSchema = z.object({
+  chats: z.array(z.object({ sessionId: z.string().trim().min(1), name: z.string().trim().max(100).optional(),
+    listen: z.enum(['mentions', 'all']).default('mentions') }).strict()).default([]),
+  directMessages: z.boolean().default(false),
+  pollSeconds: z.number().int().min(10).max(3600).default(45),
+  readPageSize: z.number().int().min(1).max(200).default(50),
+}).strict()
+export type ImConfig = z.infer<typeof ConfigSchema>
+/** Reads the agent's own 企信 identity, so its own messages are dropped and mentions of it are recognized. */
+const SelfSchema = z.looseObject({ userId: z.union([z.string(), z.number()]), userName: z.string().nullish() })
+export async function readSelf(commands: SourceContext['commands']): Promise<ImSelf> {
+  const self = SelfSchema.parse(JSON.parse(await commands.run(CLI, ['auth', 'status'])))
+  return { id: Number(self.userId), name: self.userName ?? String(self.userId) }
+}
+const SessionsSchema = z.looseObject({ sessions: z.array(z.unknown()).default([]) })
+/** The user's recently changed sessions; the Source polls only those it is configured for. */
+export async function recentSessions(commands: SourceContext['commands']): Promise<z.infer<typeof ImSessionSchema>[]> {
+  const listed = SessionsSchema.parse(JSON.parse(await commands.run(CLI, ['im', 'session', 'get-recent-list'])))
+  return validItems(ImSessionSchema, listed.sessions)
+}
+const MessagesSchema = z.looseObject({ messages: z.array(z.unknown()).default([]) })
+/** One page of a session's messages, newest first, before `fromMessageId` when given. */
+export async function listMessages(commands: SourceContext['commands'], sessionId: string, num: number, fromMessageId?: number): Promise<ImMessage[]> {
+  const args = ['im', 'message', 'list', '--sessionId', sessionId, '--num', String(num)]
+  if (fromMessageId !== undefined) args.push('--fromMessageId', String(fromMessageId))
+  const page = MessagesSchema.parse(JSON.parse(await commands.run(CLI, args)))
+  return validItems(ImMessageSchema, page.messages)
+}
+/** Whether the Source receives this session: a configured chat, or any direct chat when direct messages are on. */
+export const imWatched = (session: z.infer<typeof ImSessionSchema>, config: ImConfig): boolean =>
+  config.chats.some(chat => chat.sessionId === session.sessionId) || (config.directMessages && session.sessionCategory === 'D')
+/** The rule the configured chats give this session, when it is one of them. */
+const chatRule = (sessionId: string, config: ImConfig) => config.chats.find(chat => chat.sessionId === sessionId)
+
+export const imKind: SourceKind<ImConfig> = {
+  kind: SOURCE,
+  title: { zh: '企信', en: 'ShareCRM IM' },
+  description: { zh: '轮询下列企信会话与私聊，把消息交给评估；回话也走同一个 CLI，以 AI 身份发出。',
+    en: 'Polls these ShareCRM IM sessions and direct chats, hands their messages to Eval, and replies through the same CLI as the AI identity.' },
+  schema: ConfigSchema,
+  fields: [
+    { key: 'chats', type: 'rows', label: { zh: '接收的会话', en: 'Sessions' },
+      hint: { zh: '“仅 @”只把 @ 智能体或引用其消息的消息当作点名；“全部消息”还接收其余消息，评估可以按规则从中推断工作。',
+        en: '"@ only" treats a mention of the agent, or a quote of its message, as addressed; "All" also receives the rest, from which Eval may infer work under the rules.' },
+      columns: [
+        { key: 'sessionId', type: 'text', label: { zh: '会话 ID', en: 'Session ID' }, pattern: '[A-Za-z0-9_-]{1,64}' },
+        { key: 'name', type: 'text', label: { zh: '名称', en: 'Name' }, optional: true },
+        { key: 'listen', type: 'select', label: { zh: '接收', en: 'Receive' }, options: [
+          { value: 'mentions', label: { zh: '仅 @', en: '@ only' } }, { value: 'all', label: { zh: '全部消息', en: 'All' } }] },
+      ] },
+    { key: 'directMessages', type: 'switch', label: { zh: '接收私聊', en: 'Direct messages' } },
+    { key: 'pollSeconds', type: 'number', advanced: true, min: 10, max: 3600, label: { zh: '轮询间隔 / 秒', en: 'Polling interval / seconds' } },
+    { key: 'readPageSize', type: 'number', advanced: true, min: 1, max: 200, label: { zh: '每页消息数', en: 'Messages per page' },
+      hint: { zh: '智能体读取上下文与每轮拉取时每页的消息数。', en: 'Messages per page when agents read context and when a round fetches messages.' } },
+  ],
+  health: ['im'],
+  scope({ meta }, config) {
+    const sessionId = String(meta.sessionId ?? '')
+    if (meta.direct === true) return config.directMessages ? { listened: true, observed: false, row: 'direct' } : { listened: false, reason: 'direct_messages_not_allowed' }
+    const chat = chatRule(sessionId, config)
+    if (chat) return { listened: true, observed: chat.listen === 'all', row: sessionId }
+    return { listened: false, reason: 'session_not_allowed' }
+  },
+  channel: {
+    // A reply goes only to a session the Source still receives.
+    allowed: (address, config) => imKind.scope!({ meta: { sessionId: address.sessionId ?? '', direct: address.direct === 'true' } }, config).listened,
+    async send(host, message: OutboundMessage) {
+      const { sessionId, messageId } = message.channel.address
+      if (!sessionId) throw new Error('Missing 企信 reply target')
+      const args = ['im', 'message', 'send-txt', '--sessionId', sessionId, '--text', checkedImText(message.text), '--markdownFormat', 'true']
+      if (messageId) args.push('--replyMessageId', messageId)
+      try { await host.commands.run(CLI, args) }
+      catch (error) {
+        // A recalled message, a session the agent left, or a message it may no longer see: the reply can never arrive.
+        if (error instanceof CliError && /not found|不存在|无权限|forbidden/i.test(error.message)) return 'gone'
+        throw error
+      }
+      return 'sent'
+    },
+    link: address => ({ url: '', label: { zh: '企信会话', en: 'IM session' }, ...address.messageId ? { triggerId: imTriggerIdOf(address.messageId) } : {} }),
+  },
+  threadContext: {
+    messageId: trigger => String(trigger.meta.messageId ?? ''),
+    async read(commands, trigger: Trigger, part, cursor, config) {
+      const sessionId = String(trigger.meta.sessionId ?? '')
+      if (!sessionId) throw new Error('An IM source trigger is required')
+      const page = await listMessages(commands, sessionId, config.readPageSize, cursor ? Number(cursor) : undefined)
+      const messages = page.map(imContextMessage).reverse()
+      const next = page.length >= config.readPageSize ? String(page.at(-1)!.messageId) : undefined
+      return { messages: part === 'root' ? messages.filter(item => item.id === String(trigger.meta.messageId)) : messages,
+        next, body: { sessionId, part, count: messages.length }, status: 'available' }
+    },
+  },
+  policy: {
+    unnamed: { person: { zh: '企信用户', en: 'IM user' }, bot: { zh: '企信机器人', en: 'IM bot' } },
+    schema: z.object({
+      allowed: z.array(z.object({ id: z.string().regex(/^\d{1,20}$/), name: z.string().trim().max(100).optional() }).strict())
+        .refine(people => new Set(people.map(person => person.id)).size === people.length, 'Duplicate user IDs').default([]),
+    }).strict(),
+    fields: [
+      { key: 'allowed', type: 'rows', label: { zh: '能发起工作的企信用户', en: 'IM users who may originate work' },
+        columns: [{ key: 'id', type: 'text', label: { zh: '用户 ID', en: 'User ID' }, pattern: '[0-9]{1,20}' },
+          { key: 'name', type: 'text', label: { zh: '名字', en: 'Name' }, optional: true }] },
+    ],
+    explicit: { zh: '名单内的人 @ 智能体或私聊它，总是明确的请求；引用智能体消息也算点名。',
+      en: 'Someone on the list who mentions the agent or messages it directly always makes an explicit request; quoting its message counts as addressed too.' },
+    rows(stored) {
+      const config = ConfigSchema.parse(stored)
+      const mentions = { zh: '仅 @', en: '@ only' }
+      return [
+        ...config.chats.map(chat => ({ id: chat.sessionId, label: chat.name || chat.sessionId, note: chat.listen === 'all' ? { zh: '全部消息', en: 'All' } : mentions,
+          cells: { listedUnaddressed: chat.listen === 'all', unlistedAddressed: true, unlistedUnaddressed: chat.listen === 'all' } })),
+        { id: 'direct', label: { zh: '私聊', en: 'Direct messages' }, note: config.directMessages ? { zh: '接收', en: 'Received' } : { zh: '不接收', en: 'Not received' },
+          cells: { listedUnaddressed: false, unlistedAddressed: config.directMessages, unlistedUnaddressed: false } },
+      ]
+    },
+  },
+  environment: {
+    variables: [{ key: 'DSH_SUPERAGENT_IM_SESSION', description: { zh: '接下工单的企信会话 ID；工单不是从企信来的时为空', en: 'Session ID of the IM chat that started the ticket; empty when it did not start on IM' } }],
+    values: ({ trigger }) => ({ DSH_SUPERAGENT_IM_SESSION: trigger?.source === SOURCE ? String(trigger.meta.sessionId ?? '') : '' }),
+  },
+}
+
+/** A Trigger id for a message id, so a Channel link can point back at the message it replies to. */
+const imTriggerIdOf = (messageId: string): string => `${SOURCE}-message:${messageId}`
+const imContextMessage = (message: ImMessage): ContextMessage => { const quote = imQuote(message)
+  return { id: String(message.messageId), from: message.senderName ?? String(message.senderId),
+    at: new Date(message.messageTime).toISOString(), text: imText(message), ...quote ? { reply_to: String(quote.messageId) } : {} } }
+
+export const name = 'dsh-superagent-im'
+export const inject = ['orchestrator']
+export function apply(ctx: Context): void {
+  ctx.effect(() => ctx.orchestrator.sources.register(imKind), 'im: source kind')
+  ctx.effect(() => {
+    const source = sourceContext(ctx.orchestrator, imKind)
+    const controller = new AbortController()
+    // Unhandled rejections terminate the DSH process, so a failure escaping the loop is reported as Source health instead.
+    const running = runIm(source, controller.signal).catch((error: unknown) => { source.report('im', { state: 'error', detail: String(error) }) })
+    return async () => { controller.abort(); await running }
+  })
+}
+
+/** Polls the configured sessions until the signal aborts, reporting health instead of throwing. */
+export async function runIm(ctx: SourceContext, signal: AbortSignal): Promise<void> {
+  await ctx.ready
+  let self: ImSelf | undefined
+  while (!signal.aborted) {
+    const config = ctx.config<ImConfig>(SOURCE)
+    const report = (state: 'starting' | 'ready' | 'error', detail: string) => ctx.report('im', { state, detail })
+    if (!config || (!config.chats.length && !config.directMessages)) {
+      report('ready', 'Waiting for a session to receive')
+      await pause(RECHECK_MS, signal)
+      continue
+    }
+    try {
+      self ??= await readSelf(ctx.commands)
+      const sessions = (await recentSessions(ctx.commands)).filter(session => imWatched(session, config))
+      for (const session of sessions) {
+        if (signal.aborted) return
+        await pollSession(ctx, config, self, session)
+      }
+      report('ready', `Watching ${sessions.length} session(s); next poll in ${config.pollSeconds}s`)
+    } catch (error) {
+      report('error', String(error))
+    }
+    await pause(config.pollSeconds * 1000, signal)
+  }
+}
+
+/** Ingests the messages of one session that arrived after its cursor, oldest first, then advances the cursor. */
+async function pollSession(ctx: SourceContext, config: ImConfig, self: ImSelf, session: z.infer<typeof ImSessionSchema>): Promise<void> {
+  const cursorKey = KV.im.cursor(session.sessionId)
+  const since: number | undefined = ctx.state.get(cursorKey)
+  if (since === undefined) {
+    // The first look starts from now: old messages are not history the agent should answer.
+    ctx.state.set(cursorKey, session.lastMessageTime ?? Date.now())
+    return
+  }
+  const fresh: ImMessage[] = []
+  let from: number | undefined
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const messages = await listMessages(ctx.commands, session.sessionId, config.readPageSize, from)
+    if (!messages.length) break
+    fresh.push(...messages.filter(message => message.messageTime > since))
+    const oldest = messages.at(-1)!
+    if (messages.length < config.readPageSize || oldest.messageTime <= since) break
+    from = oldest.messageId
+  }
+  const ordered = fresh.sort((left, right) => left.messageTime - right.messageTime)
+  for (const message of ordered) {
+    if (message.senderId === self.id) continue
+    const trigger = imTrigger(session, message, self)
+    ctx.threads.describe(`${SOURCE}:${imThreadId(session, message)}`, { label: session.sessionName ?? session.sessionId })
+    await ctx.receive(trigger)
+  }
+  if (ordered.length) ctx.state.set(cursorKey, ordered.at(-1)!.messageTime)
+}

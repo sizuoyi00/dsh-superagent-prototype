@@ -374,6 +374,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/feishu-loops.ts` | The Feishu loops: the event consumer, history recovery, chat names and polling of subscribed topics |
 | `src/sources/feishu-channel.ts` | The Feishu Channel: topic replies, `sent` or `gone` |
 | `src/sources/feishu-read.ts` | The `feishu/` reads of a Trigger's message, its root, parent and topic, and `feishuThreadContext`, which gives them to assessments with their images |
+| `src/sources/im.ts` | The 企信 kind and plugin entry, exported as `./im-watch`: polling, cursors, the reply channel, and `runIm` |
+| `src/sources/im-trigger.ts` | 企信 sessions and messages as Triggers: text, thread anchor, addressed, and own messages |
 | `src/sources/schedule.ts` | The Schedule kind and plugin entry, exported as `./schedule-watch`: a cron expression and a fixed instruction fired as Triggers, the next firing, and the last firing kept across restarts |
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
@@ -412,6 +414,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |
 | `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
 | `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |
+| `tests/im-trigger.spec.ts` | 企信 messages as Triggers: text, thread, addressed, own messages, one id per version |
 | `tests/schedule.spec.ts` | The Schedule Source: cron parsing, the next firing, the Trigger one firing builds, and its settings |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
