@@ -7,6 +7,7 @@ import { EvalStatus } from './eval.tsx'
 import { ExecutionStatus } from './execution.tsx'
 import { ticketMark } from './marks.ts'
 import { GLOSSARY, GLOSSARY_VALUES, en, zh, type DshSuperagentKey } from './locales.ts'
+import { BoardPage } from './board.tsx'
 import { OverviewPage } from './overview.tsx'
 import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
 import { HOME, TABS, initialLocation, lastSettingsGroup, remember, routeLabel, settingsRoute, type Location, type Route,
@@ -147,6 +148,7 @@ function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab
   const page = (() => {
     switch (route.page) {
       case 'overview': return <OverviewPage />
+      case 'board': return <BoardPage />
       case 'source': return <SourceStatus />
       case 'trigger': return route.id !== undefined ? <ThreadPage key={route.id} id={route.id} target={route.query?.trigger} />
         : <TriggerStatus filter={route.query?.filter ?? 'subscribed'} />

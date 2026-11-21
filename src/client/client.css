@@ -380,3 +380,15 @@ a.dt-btn, a.dt-btn:hover { text-decoration: none; }
 .dt-admission-slot { display: inline-flex; flex: none; width: 16px; }
 .dt-info-warn { color: var(--dsw-alias-state-warn-primary); }
 .dt-field-segmented { max-width: 240px; }
+/* My work board: five stage columns. Stages are derived, so a column reads as a status, not a drop target. */
+.dt-board { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; align-items: start; }
+.dt-board-column { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.dt-board-column .dt-list { margin: 0; gap: 4px; }
+.dt-board-column .dt-row { padding: 8px 6px; }
+.dt-board-column .dt-ticket-meta { font-size: 11px; line-height: 16px; }
+@container (max-width: 760px) {
+  .dt-board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@container (max-width: 460px) {
+  .dt-board { grid-template-columns: minmax(0, 1fr); }
+}
