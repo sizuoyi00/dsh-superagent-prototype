@@ -47,9 +47,12 @@ export async function listMessages(commands: SourceContext['commands'], sessionI
   return validItems(ImMessageSchema, page.messages)
 }
 /** Whether the Source receives this session: a configured chat, or any direct chat when direct messages are on. */
-export const imWatched = (session: z.infer<typeof ImSessionSchema>, config: ImConfig): boolean =>
-  config.chats.some(chat => chat.sessionId === session.sessionId)
-  || (session.sessionCategory === 'D' ? config.directMessages : config.otherChats === 'mentions')
+/** Only a group or a direct chat is a conversation people address the agent in; system channels are never read. */
+export const imConversation = (session: z.infer<typeof ImSessionSchema>): boolean =>
+  session.sessionCategory === 'T' || session.sessionCategory === 'D'
+export const imWatched = (session: z.infer<typeof ImSessionSchema>, config: ImConfig): boolean => imConversation(session)
+  && (config.chats.some(chat => chat.sessionId === session.sessionId)
+    || (session.sessionCategory === 'D' ? config.directMessages : config.otherChats === 'mentions'))
 /** The rule the configured chats give this session, when it is one of them. */
 const chatRule = (sessionId: string, config: ImConfig) => config.chats.find(chat => chat.sessionId === sessionId)
 
@@ -182,11 +185,14 @@ export async function runIm(ctx: SourceContext, signal: AbortSignal): Promise<vo
     try {
       self ??= await readSelf(ctx.commands)
       const sessions = (await recentSessions(ctx.commands)).filter(session => imWatched(session, config))
+      const failures: string[] = []
       for (const session of sessions) {
         if (signal.aborted) return
-        await pollSession(ctx, config, self, session)
+        // One unreadable session must not blind the others, so its failure is collected and the round goes on.
+        try { await pollSession(ctx, config, self, session) } catch (error) { failures.push(String(error)) }
       }
-      report('ready', `Watching ${sessions.length} session(s); next poll in ${config.pollSeconds}s`)
+      if (failures.length >= sessions.length && failures.length) report('error', failures[0]!)
+      else report('ready', `Watching ${sessions.length} session(s)${failures.length ? `; ${failures.length} unreadable` : ''}; next poll in ${config.pollSeconds}s`)
     } catch (error) {
       report('error', String(error))
     }

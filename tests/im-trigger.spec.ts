@@ -1,7 +1,7 @@
 /** The 企信 Source's message mapping: text, thread, addressed, own messages, and one id per message version. */
 import { describe, expect, it, vi } from 'vitest'
 import type { Trigger } from '../src/core/index.ts'
-import { imKind, imWatched, runIm } from '../src/sources/im.ts'
+import { imConversation, imKind, imWatched, runIm } from '../src/sources/im.ts'
 import { imAddressed, imOwn, imThreadId, imTrigger, imTriggerId, imText, ImMessageSchema, ImSessionSchema } from '../src/sources/im-trigger.ts'
 
 const self = { id: 9766, name: '斯作益seth' }
@@ -121,5 +121,14 @@ describe('which sessions are received', () => {
     expect(imKind.scope!({ meta: { sessionId: 'g1', direct: false } }, all)).toMatchObject({ listened: true, observed: false, row: 'other' })
     expect(imWatched(one, { ...base, directMessages: true })).toBe(true)
     expect(imKind.scope!({ meta: { sessionId: 'd1', direct: true } }, { ...base, directMessages: true })).toMatchObject({ listened: true, row: 'direct' })
+  })
+})
+
+describe('system channels', () => {
+  it('never reads a system channel, even with other sessions on', () => {
+    const oss = ImSessionSchema.parse({ sessionId: 'OSS1.publish.1', sessionCategory: 'OSS1', participants: [] })
+    const config = { chats: [], directMessages: true, otherChats: 'mentions' as const, pollSeconds: 30, readPageSize: 50 }
+    expect(imConversation(oss)).toBe(false)
+    expect(imWatched(oss, config)).toBe(false)
   })
 })
