@@ -208,6 +208,23 @@
 - 机器人自身消息在 Source 内丢弃（不进领域）。
 - 撤回消息产生一条 `meta.recalled` 的 Trigger，让工单知道上下文失效，而不是当普通正文处理。
 
+### 7.2.1 实测字段（2026-11-22 用真实消息核对，只读字段结构，未留存内容）
+
+| 事实 | 结论 |
+|---|---|
+| 消息字段 | `messageId / messageTime / messageType / content / senderId / senderName / fullSenderId / messageVersion / replyMessageVo / feedTextBlockVos / private / modifiedStatus ...` |
+| 引用对象 | `replyMessageVo = { messageId, messageTime, messageType, content, fullSenderId }` —— **没有 senderId**，只有 `fullSenderId` |
+| 人的 fullSenderId | `E.fs.<senderId>`（146/146 与 `senderId` 一致） |
+| 机器人的 fullSenderId | `BOT.<id>.fs_<hash>` |
+| @ 的形态 | **只有文本**：`@` 后跟中文显示名；实测 61 处 @ 全部是「CJK+CJK」，没有结构化的 at 列表字段 |
+| 系统通道 | 读取 `OSS1.*` 需要 `--confirm`，因此永不读取；只读群（T）与单聊（D） |
+
+由此产生的三条实现约束（已落地）：
+
+1. 引用判定比较 `replyMessageVo.fullSenderId` 与自己的 `E.fs.<id>`，不再找 `senderId`；
+2. @ 判定按显示名匹配，显示名来源依次为：配置项 `selfName`、`auth status` 的 `userName`、以及**从自己发出的消息里学习**（自己的消息带 `senderName`）；
+3. 群里的普通消息默认不算点名；只有 @ 命中名字、引用我的消息、或私聊才算。
+
 ### 7.3 Channel
 
 - `send`：`sharecrm im message send-txt`（AI 身份，自动追加来源标记），回复到触发消息。

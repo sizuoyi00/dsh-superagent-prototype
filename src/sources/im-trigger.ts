@@ -16,7 +16,7 @@ export const ImSessionSchema = z.looseObject({
 })
 export type ImSession = z.infer<typeof ImSessionSchema>
 /** A quoted message: 企信 returns it beside the quoting message, without the quoted message's own text in some cases. */
-export const ImQuoteSchema = z.looseObject({ messageId: z.number(), senderId: z.number().nullish(), senderName: z.string().nullish(),
+export const ImQuoteSchema = z.looseObject({ messageId: z.number(), fullSenderId: z.string().nullish(), senderName: z.string().nullish(),
   content: z.string().nullish(), messageTime: z.number().nullish() })
 /** One 企信 message; `messageType` is `T` for text and other letter codes for images, files, cards and system events. */
 export const ImMessageSchema = z.looseObject({
@@ -39,7 +39,7 @@ export const ImMessageSchema = z.looseObject({
 })
 export type ImMessage = z.infer<typeof ImMessageSchema>
 /** What the Source knows about its own identity, so it can drop its own messages and recognize messages addressed to it. */
-export interface ImSelf { id: number; name: string }
+export interface ImSelf { id: number; fullId: string; names: string[] }
 /** Placeholder for a message type without text, so meaning is preserved without reading the payload. */
 const PLACEHOLDER: Record<string, string> = { I: '[图片]', F: '[文件]', V: '[语音]', MIX: '[图文]', UGT: '[卡片]', RTC: '[卡片]', S: '[系统消息]' }
 /** The readable text of a message: its content for text, a placeholder otherwise. */
@@ -62,13 +62,18 @@ export const imDirect = (session: ImSession): boolean => session.sessionCategory
 export function imAddressed(message: ImMessage, session: ImSession, self: ImSelf): 'mention' | 'direct' | undefined {
   if (imDirect(session)) return 'direct'
   const quote = imQuote(message)
-  if (quote && quote.senderId === self.id) return 'direct'
+  // 企信 quotes carry the quoted sender's full id, which for a person is `E.fs.<senderId>`.
+  if (quote && sameSender(quote.fullSenderId, self)) return 'direct'
   const ids = message.atFullUserIdList ?? []
   if (ids.some(id => id.includes(String(self.id)))) return 'mention'
+  // A mention is text only: `@` followed by the display name, which the Source learns from its own messages.
   const text = imText(message)
-  if (text.includes(`@${self.name}`)) return 'mention'
+  if (self.names.some(name => name && text.includes(`@${name}`))) return 'mention'
   return undefined
 }
+/** Whether a full sender id names the agent: `E.fs.<id>` is the account's own id, and a bot may carry it too. */
+export const sameSender = (fullId: string | null | undefined, self: ImSelf): boolean =>
+  !!fullId && (fullId === self.fullId || fullId.endsWith(`.${self.id}`) || fullId.includes(`fs.${self.id}`))
 /** Thread key of a message: its chat plus the message that anchors the topic (the quoted one, else itself). */
 export const imThreadId = (session: ImSession, message: ImMessage): string =>
   `${session.sessionId}:${imQuote(message)?.messageId ?? message.messageId}`
@@ -87,5 +92,5 @@ export function imTrigger(session: ImSession, message: ImMessage, self: ImSelf):
     at: new Date(message.messageTime).toISOString(), text: imText(message),
     ...(addressed ? { addressed } : {}), channel: imChannel(session, message),
     meta: { sessionId: session.sessionId, messageId: message.messageId, ...(session.sessionName ? { sessionName: session.sessionName } : {}),
-      direct: imDirect(session), ...(quote ? { quoted: quote.messageId, quotedSender: quote.senderId ?? null } : {}) } }
+      direct: imDirect(session), ...(quote ? { quoted: quote.messageId, quotedSender: quote.fullSenderId ?? null } : {}) } }
 }

@@ -4,7 +4,7 @@ import type { Trigger } from '../src/core/index.ts'
 import { imConversation, imKind, imWatched, runIm } from '../src/sources/im.ts'
 import { imAddressed, imOwn, imThreadId, imTrigger, imTriggerId, imText, ImMessageSchema, ImSessionSchema } from '../src/sources/im-trigger.ts'
 
-const self = { id: 9766, name: '斯作益seth' }
+const self = { id: 9766, fullId: 'E.fs.9766', names: ['斯作益seth'] }
 const session = ImSessionSchema.parse({ sessionId: 's1', sessionName: '团队群', sessionCategory: 'T', participants: [] })
 const direct = ImSessionSchema.parse({ sessionId: 's2', sessionCategory: 'D', participants: [] })
 const message = (fields: Record<string, unknown> = {}) => ImMessageSchema.parse({ messageId: 10, senderId: 42, senderName: '张三',
@@ -36,19 +36,19 @@ describe('what a message says', () => {
 describe('what a message is addressed to', () => {
   it('is addressed when it mentions the agent, quotes it, or is a direct chat', () => {
     expect(imAddressed(message({ content: '@斯作益seth 这个怎么处理' }), session, self)).toBe('mention')
-    expect(imAddressed(message({ replyMessageVo: { messageId: 5, senderId: 9766 } }), session, self)).toBe('direct')
+    expect(imAddressed(message({ replyMessageVo: { messageId: 5, fullSenderId: 'E.fs.9766' } }), session, self)).toBe('direct')
     expect(imAddressed(message(), direct, self)).toBe('direct')
   })
   it('is not addressed in a group without a mention or quote of the agent', () => {
     expect(imAddressed(message(), session, self)).toBeUndefined()
-    expect(imAddressed(message({ replyMessageVo: { messageId: 5, senderId: 7 } }), session, self)).toBeUndefined()
+    expect(imAddressed(message({ replyMessageVo: { messageId: 5, fullSenderId: 'E.fs.7' } }), session, self)).toBeUndefined()
   })
 })
 
 describe('threads and ids', () => {
   it('anchors a quoting message to the message it quotes', () => {
     expect(imThreadId(session, message())).toBe('s1:10')
-    expect(imThreadId(session, message({ replyMessageVo: { messageId: 5, senderId: 7 } }))).toBe('s1:5')
+    expect(imThreadId(session, message({ replyMessageVo: { messageId: 5, fullSenderId: 'E.fs.7' } }))).toBe('s1:5')
   })
   it('gives one id per message version, so an edit is a new Trigger and a repoll is not', () => {
     expect(imTriggerId(message())).toBe(imTriggerId(message()))
@@ -58,11 +58,11 @@ describe('threads and ids', () => {
 
 describe('the Trigger one message builds', () => {
   it('carries the sender, the chat, the quoted message, and whether it was addressed', () => {
-    const trigger = imTrigger(session, message({ replyMessageVo: { messageId: 5, senderId: 7 }, content: '@斯作益seth 看一下' }), self)
+    const trigger = imTrigger(session, message({ replyMessageVo: { messageId: 5, fullSenderId: 'E.fs.7' }, content: '@斯作益seth 看一下' }), self)
     expect(trigger).toMatchObject({ source: 'im', human: true, addressed: 'mention', text: '@斯作益seth 看一下',
       actor: { source: 'im', id: '42', name: '张三' }, threads: [{ source: 'im', id: 's1:5' }],
       channel: { source: 'im', thread: 'im:s1:5', address: { sessionId: 's1', messageId: '10' } } })
-    expect(trigger.meta).toMatchObject({ sessionId: 's1', messageId: 10, direct: false, quoted: 5, quotedSender: 7 })
+    expect(trigger.meta).toMatchObject({ sessionId: 's1', messageId: 10, direct: false, quoted: 5, quotedSender: 'E.fs.7' })
   })
   it('marks a bot sender as not human, so Eval gates it as a machine message', () => {
     expect(imTrigger(session, message({ fullSenderId: 'BOT.360.fs_1', senderId: 7 }), self).human).toBe(false)
@@ -108,7 +108,7 @@ describe('the loop', () => {
 })
 
 describe('which sessions are received', () => {
-  const base = { chats: [], directMessages: false, otherChats: 'none' as const, pollSeconds: 30, readPageSize: 50 }
+  const base = { chats: [], directMessages: false, otherChats: 'none' as const, selfName: '', pollSeconds: 30, readPageSize: 50 }
   const group = ImSessionSchema.parse({ sessionId: 'g1', sessionCategory: 'T', participants: [] })
   const one = ImSessionSchema.parse({ sessionId: 'd1', sessionCategory: 'D', participants: [] })
   it('receives nothing until a session, direct chats or other sessions are switched on', async () => {
@@ -128,7 +128,7 @@ describe('which sessions are received', () => {
 describe('system channels', () => {
   it('never reads a system channel, even with other sessions on', () => {
     const oss = ImSessionSchema.parse({ sessionId: 'OSS1.publish.1', sessionCategory: 'OSS1', participants: [] })
-    const config = { chats: [], directMessages: true, otherChats: 'mentions' as const, pollSeconds: 30, readPageSize: 50 }
+    const config = { chats: [], directMessages: true, otherChats: 'mentions' as const, selfName: '', pollSeconds: 30, readPageSize: 50 }
     expect(imConversation(oss)).toBe(false)
     expect(imWatched(oss, config)).toBe(false)
   })
@@ -141,7 +141,7 @@ describe('a burst longer than one round of pages', () => {
     const burst = Array.from({ length: 12 }, (_value, index) => ({ messageId: 100 + index, senderId: 42,
       messageTime: 1100 + index * 100, messageType: 'T', content: `m${index}` }))
     const ctx = loopContext({}, { chats: [{ sessionId: 's1', listen: 'mentions' as const }], directMessages: false,
-      otherChats: 'none' as const, pollSeconds: 10, readPageSize: 1 }, new Map([['im-cursor:s1', 1000]]))
+      otherChats: 'none' as const, selfName: '', pollSeconds: 10, readPageSize: 1 }, new Map([['im-cursor:s1', 1000]]))
     // A page holds the message just older than its cursor, as 企信 returns them newest first.
     ctx.value.commands.run = vi.fn(async (_program: string, args: string[]) => {
       if (args[0] === 'auth') return JSON.stringify({ userId: 9766, userName: '斯作益seth' })

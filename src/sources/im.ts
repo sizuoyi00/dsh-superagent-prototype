@@ -21,6 +21,7 @@ const ConfigSchema = z.object({
   chats: z.array(z.object({ sessionId: z.string().trim().min(1), name: z.string().trim().max(100).optional(),
     listen: z.enum(['mentions', 'all']).default('mentions') }).strict()).default([]),
   directMessages: z.boolean().default(false),
+  selfName: z.string().trim().max(100).default(''),
   otherChats: z.enum(['none', 'mentions']).default('none'),
   pollSeconds: z.number().int().min(10).max(3600).default(45),
   readPageSize: z.number().int().min(1).max(200).default(50),
@@ -28,9 +29,11 @@ const ConfigSchema = z.object({
 export type ImConfig = z.infer<typeof ConfigSchema>
 /** Reads the agent's own 企信 identity, so its own messages are dropped and mentions of it are recognized. */
 const SelfSchema = z.looseObject({ userId: z.union([z.string(), z.number()]), userName: z.string().nullish() })
-export async function readSelf(commands: SourceContext['commands']): Promise<ImSelf> {
+export async function readSelf(commands: SourceContext['commands'], configured?: string): Promise<ImSelf> {
   const self = SelfSchema.parse(JSON.parse(await commands.run(CLI, ['auth', 'status'])))
-  return { id: Number(self.userId), name: self.userName ?? String(self.userId) }
+  const id = Number(self.userId)
+  // A person's full sender id is `E.fs.<id>`; the names are what a mention in a message's text looks like.
+  return { id, fullId: `E.fs.${id}`, names: [...new Set([configured?.trim(), self.userName, String(id)].filter((name): name is string => !!name))] }
 }
 const SessionsSchema = z.looseObject({ sessions: z.array(z.unknown()).default([]) })
 /** The user's recently changed sessions; the Source polls only those it is configured for. */
@@ -73,6 +76,9 @@ export const imKind: SourceKind<ImConfig> = {
           { value: 'mentions', label: { zh: '仅 @', en: '@ only' } }, { value: 'all', label: { zh: '全部消息', en: 'All' } }] },
       ] },
     { key: 'directMessages', type: 'switch', label: { zh: '接收私聊', en: 'Direct messages' } },
+    { key: 'selfName', type: 'text', advanced: true, label: { zh: '我在企信里的显示名', en: 'My display name in 企信' },
+      hint: { zh: '群里的 @ 只有文字，没有结构化的用户 ID，所以按这个名字识别“@我”。留空时会从自己发出的消息里学习。',
+        en: 'A mention in a group is text only, without a structured user ID, so this name is what "@ me" matches. Left empty, the Source learns it from messages it sent.' } },
     { key: 'otherChats', type: 'select', label: { zh: '其他会话', en: 'Other sessions' }, options: [
       { value: 'none', label: { zh: '不接收', en: 'Not received' } }, { value: 'mentions', label: { zh: '仅 @', en: '@ only' } }],
       hint: { zh: '没有列在上面的会话（含以后新建的）。“仅 @”接收那里 @ 智能体或引用其消息的消息；谁能发起工作仍由策略里的准入决定。',
@@ -183,7 +189,7 @@ export async function runIm(ctx: SourceContext, signal: AbortSignal): Promise<vo
       continue
     }
     try {
-      self ??= await readSelf(ctx.commands)
+      self ??= await readSelf(ctx.commands, config.selfName)
       const sessions = (await recentSessions(ctx.commands)).filter(session => imWatched(session, config))
       const failures: string[] = []
       for (const session of sessions) {
@@ -224,7 +230,11 @@ async function pollSession(ctx: SourceContext, config: ImConfig, self: ImSelf, s
   const window = reached ? pages.flat() : pages.at(-1) ?? []
   const ordered = window.filter(message => message.messageTime > since).sort((left, right) => left.messageTime - right.messageTime)
   for (const message of ordered) {
-    if (message.senderId === self.id) continue
+    if (message.senderId === self.id) {
+      // The agent's own messages carry the display name people mention; learning it makes "@ me" work.
+      if (message.senderName && !self.names.includes(message.senderName)) self.names.push(message.senderName)
+      continue
+    }
     const trigger = imTrigger(session, message, self)
     ctx.threads.describe(`${SOURCE}:${imThreadId(session, message)}`, { label: session.sessionName ?? session.sessionId })
     await ctx.receive(trigger)
