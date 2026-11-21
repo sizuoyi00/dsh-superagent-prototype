@@ -21,6 +21,7 @@ const ConfigSchema = z.object({
   chats: z.array(z.object({ sessionId: z.string().trim().min(1), name: z.string().trim().max(100).optional(),
     listen: z.enum(['mentions', 'all']).default('mentions') }).strict()).default([]),
   directMessages: z.boolean().default(false),
+  otherChats: z.enum(['none', 'mentions']).default('none'),
   pollSeconds: z.number().int().min(10).max(3600).default(45),
   readPageSize: z.number().int().min(1).max(200).default(50),
 }).strict()
@@ -47,7 +48,8 @@ export async function listMessages(commands: SourceContext['commands'], sessionI
 }
 /** Whether the Source receives this session: a configured chat, or any direct chat when direct messages are on. */
 export const imWatched = (session: z.infer<typeof ImSessionSchema>, config: ImConfig): boolean =>
-  config.chats.some(chat => chat.sessionId === session.sessionId) || (config.directMessages && session.sessionCategory === 'D')
+  config.chats.some(chat => chat.sessionId === session.sessionId)
+  || (session.sessionCategory === 'D' ? config.directMessages : config.otherChats === 'mentions')
 /** The rule the configured chats give this session, when it is one of them. */
 const chatRule = (sessionId: string, config: ImConfig) => config.chats.find(chat => chat.sessionId === sessionId)
 
@@ -68,6 +70,10 @@ export const imKind: SourceKind<ImConfig> = {
           { value: 'mentions', label: { zh: '仅 @', en: '@ only' } }, { value: 'all', label: { zh: '全部消息', en: 'All' } }] },
       ] },
     { key: 'directMessages', type: 'switch', label: { zh: '接收私聊', en: 'Direct messages' } },
+    { key: 'otherChats', type: 'select', label: { zh: '其他会话', en: 'Other sessions' }, options: [
+      { value: 'none', label: { zh: '不接收', en: 'Not received' } }, { value: 'mentions', label: { zh: '仅 @', en: '@ only' } }],
+      hint: { zh: '没有列在上面的会话（含以后新建的）。“仅 @”接收那里 @ 智能体或引用其消息的消息；谁能发起工作仍由策略里的准入决定。',
+        en: 'Sessions not listed above, including ones created later. "@ only" receives messages there that mention the agent or quote it; whose messages may originate work is still the Policy\'s admission.' } },
     { key: 'pollSeconds', type: 'number', advanced: true, min: 10, max: 3600, label: { zh: '轮询间隔 / 秒', en: 'Polling interval / seconds' } },
     { key: 'readPageSize', type: 'number', advanced: true, min: 1, max: 200, label: { zh: '每页消息数', en: 'Messages per page' },
       hint: { zh: '智能体读取上下文与每轮拉取时每页的消息数。', en: 'Messages per page when agents read context and when a round fetches messages.' } },
@@ -78,7 +84,7 @@ export const imKind: SourceKind<ImConfig> = {
     if (meta.direct === true) return config.directMessages ? { listened: true, observed: false, row: 'direct' } : { listened: false, reason: 'direct_messages_not_allowed' }
     const chat = chatRule(sessionId, config)
     if (chat) return { listened: true, observed: chat.listen === 'all', row: sessionId }
-    return { listened: false, reason: 'session_not_allowed' }
+    return config.otherChats === 'mentions' ? { listened: true, observed: false, row: 'other' } : { listened: false, reason: 'session_not_allowed' }
   },
   channel: {
     // A reply goes only to a session the Source still receives.
@@ -129,6 +135,8 @@ export const imKind: SourceKind<ImConfig> = {
       return [
         ...config.chats.map(chat => ({ id: chat.sessionId, label: chat.name || chat.sessionId, note: chat.listen === 'all' ? { zh: '全部消息', en: 'All' } : mentions,
           cells: { listedUnaddressed: chat.listen === 'all', unlistedAddressed: true, unlistedUnaddressed: chat.listen === 'all' } })),
+        { id: 'other', label: { zh: '其他会话', en: 'Other sessions' }, note: config.otherChats === 'mentions' ? mentions : { zh: '不接收', en: 'Not received' },
+          cells: { listedUnaddressed: false, unlistedAddressed: config.otherChats === 'mentions', unlistedUnaddressed: false } },
         { id: 'direct', label: { zh: '私聊', en: 'Direct messages' }, note: config.directMessages ? { zh: '接收', en: 'Received' } : { zh: '不接收', en: 'Not received' },
           cells: { listedUnaddressed: false, unlistedAddressed: config.directMessages, unlistedUnaddressed: false } },
       ]
@@ -166,7 +174,7 @@ export async function runIm(ctx: SourceContext, signal: AbortSignal): Promise<vo
   while (!signal.aborted) {
     const config = ctx.config<ImConfig>(SOURCE)
     const report = (state: 'starting' | 'ready' | 'error', detail: string) => ctx.report('im', { state, detail })
-    if (!config || (!config.chats.length && !config.directMessages)) {
+    if (!config || (!config.chats.length && !config.directMessages && config.otherChats === 'none')) {
       report('ready', 'Waiting for a session to receive')
       await pause(RECHECK_MS, signal)
       continue

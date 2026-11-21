@@ -1,7 +1,7 @@
 /** The 企信 Source's message mapping: text, thread, addressed, own messages, and one id per message version. */
 import { describe, expect, it, vi } from 'vitest'
 import type { Trigger } from '../src/core/index.ts'
-import { runIm } from '../src/sources/im.ts'
+import { imKind, imWatched, runIm } from '../src/sources/im.ts'
 import { imAddressed, imOwn, imThreadId, imTrigger, imTriggerId, imText, ImMessageSchema, ImSessionSchema } from '../src/sources/im-trigger.ts'
 
 const self = { id: 9766, name: '斯作益seth' }
@@ -103,5 +103,23 @@ describe('the loop', () => {
     expect(ctx.state.get('im-cursor:s1')).toBe(1300)
     controller.abort(); await running
     vi.useRealTimers()
+  })
+})
+
+describe('which sessions are received', () => {
+  const base = { chats: [], directMessages: false, otherChats: 'none' as const, pollSeconds: 30, readPageSize: 50 }
+  const group = ImSessionSchema.parse({ sessionId: 'g1', sessionCategory: 'T', participants: [] })
+  const one = ImSessionSchema.parse({ sessionId: 'd1', sessionCategory: 'D', participants: [] })
+  it('receives nothing until a session, direct chats or other sessions are switched on', async () => {
+    expect(imWatched(group, base)).toBe(false)
+    expect(imWatched(one, base)).toBe(false)
+    expect(imKind.scope!({ meta: { sessionId: 'g1', direct: false } }, base)).toMatchObject({ listened: false })
+  })
+  it('receives every unlisted session when other sessions are on, and every direct chat when they are on', async () => {
+    const all = { ...base, otherChats: 'mentions' as const }
+    expect(imWatched(group, all)).toBe(true)
+    expect(imKind.scope!({ meta: { sessionId: 'g1', direct: false } }, all)).toMatchObject({ listened: true, observed: false, row: 'other' })
+    expect(imWatched(one, { ...base, directMessages: true })).toBe(true)
+    expect(imKind.scope!({ meta: { sessionId: 'd1', direct: true } }, { ...base, directMessages: true })).toMatchObject({ listened: true, row: 'direct' })
   })
 })
