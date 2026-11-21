@@ -209,17 +209,20 @@ async function pollSession(ctx: SourceContext, config: ImConfig, self: ImSelf, s
     ctx.state.set(cursorKey, session.lastMessageTime ?? Date.now())
     return
   }
-  const fresh: ImMessage[] = []
+  const pages: ImMessage[][] = []
+  let reached = false
   let from: number | undefined
   for (let page = 0; page < MAX_PAGES; page++) {
     const messages = await listMessages(ctx.commands, session.sessionId, config.readPageSize, from)
-    if (!messages.length) break
-    fresh.push(...messages.filter(message => message.messageTime > since))
+    if (!messages.length) { reached = true; break }
+    pages.push(messages)
     const oldest = messages.at(-1)!
-    if (messages.length < config.readPageSize || oldest.messageTime <= since) break
+    if (messages.length < config.readPageSize || oldest.messageTime <= since) { reached = true; break }
     from = oldest.messageId
   }
-  const ordered = fresh.sort((left, right) => left.messageTime - right.messageTime)
+  // A burst longer than one round of pages is caught up from its oldest page, so no message is skipped and the order holds.
+  const window = reached ? pages.flat() : pages.at(-1) ?? []
+  const ordered = window.filter(message => message.messageTime > since).sort((left, right) => left.messageTime - right.messageTime)
   for (const message of ordered) {
     if (message.senderId === self.id) continue
     const trigger = imTrigger(session, message, self)

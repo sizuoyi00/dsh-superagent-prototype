@@ -10,6 +10,21 @@ const direct = ImSessionSchema.parse({ sessionId: 's2', sessionCategory: 'D', pa
 const message = (fields: Record<string, unknown> = {}) => ImMessageSchema.parse({ messageId: 10, senderId: 42, senderName: '张三',
   messageTime: 1795200000000, messageType: 'T', content: '帮我看下这个报错', ...fields })
 
+/** A context whose CLI answers from canned pages, so the loop's cursor and filtering can be checked without 企信. */
+function loopContext(pages: Record<string, unknown[]>, config: Record<string, unknown>, state = new Map<string, number>()) {
+  const receive = vi.fn(async (_trigger: Trigger) => ({ result: 'received' as const }))
+  const report = vi.fn()
+  const commands = { run: vi.fn(async (_program: string, args: string[]) => {
+    if (args[0] === 'auth') return JSON.stringify({ userId: 9766, userName: '斯作益seth' })
+    if (args[0] === 'im' && args[1] === 'session') return JSON.stringify({ sessions: [{ sessionId: 's1', sessionName: '团队群', sessionCategory: 'T', participants: [], lastMessageTime: 1000 }] })
+    return JSON.stringify({ messages: pages[args[4]!] ?? [] })
+  }) }
+  const value = { ready: Promise.resolve(), config: () => config, report, commands,
+    state: { get: (key: string) => state.get(key), set: (key: string, value: number) => { state.set(key, value) }, keys: () => [] },
+    threads: { describe: vi.fn() }, receive } as unknown as Parameters<typeof runIm>[0]
+  return { value, receive, report, state }
+}
+
 describe('what a message says', () => {
   it('keeps text as written and names a message without text by its type', () => {
     expect(imText(message())).toBe('帮我看下这个报错')
@@ -63,24 +78,10 @@ describe('own messages', () => {
 })
 
 describe('the loop', () => {
-  /** A context whose CLI answers from canned pages, so the loop's cursor and filtering can be checked without 企信. */
-  function context(pages: Record<string, unknown[]>, config: Record<string, unknown>, state = new Map<string, number>()) {
-    const receive = vi.fn(async (_trigger: Trigger) => ({ result: 'received' as const }))
-    const report = vi.fn()
-    const commands = { run: vi.fn(async (_program: string, args: string[]) => {
-      if (args[0] === 'auth') return JSON.stringify({ userId: 9766, userName: '斯作益seth' })
-      if (args[0] === 'im' && args[1] === 'session') return JSON.stringify({ sessions: [{ sessionId: 's1', sessionName: '团队群', sessionCategory: 'T', participants: [], lastMessageTime: 1000 }] })
-      return JSON.stringify({ messages: pages[args[4]!] ?? [] })
-    }) }
-    const value = { ready: Promise.resolve(), config: () => config, report, commands,
-      state: { get: (key: string) => state.get(key), set: (key: string, value: number) => { state.set(key, value) }, keys: () => [] },
-      threads: { describe: vi.fn() }, receive } as unknown as Parameters<typeof runIm>[0]
-    return { value, receive, report, state }
-  }
   const config = { chats: [{ sessionId: 's1', listen: 'mentions' as const }], directMessages: false, pollSeconds: 10, readPageSize: 50 }
   it('starts from the newest message time and ingests nothing on the first look', async () => {
     vi.useFakeTimers()
-    const ctx = context({ s1: [] }, config)
+    const ctx = loopContext({ s1: [] }, config)
     const controller = new AbortController()
     const running = runIm(ctx.value, controller.signal)
     await vi.advanceTimersByTimeAsync(20_000)
@@ -91,7 +92,7 @@ describe('the loop', () => {
   })
   it('ingests messages after the cursor oldest first, skips its own, and advances the cursor', async () => {
     vi.useFakeTimers()
-    const ctx = context({ s1: [
+    const ctx = loopContext({ s1: [
       { messageId: 13, senderId: 42, messageTime: 1300, messageType: 'T', content: '@斯作益seth 三' },
       { messageId: 12, senderId: 9766, messageTime: 1200, messageType: 'T', content: '二' },
       { messageId: 11, senderId: 42, messageTime: 1100, messageType: 'T', content: '一' },
@@ -130,5 +131,36 @@ describe('system channels', () => {
     const config = { chats: [], directMessages: true, otherChats: 'mentions' as const, pollSeconds: 30, readPageSize: 50 }
     expect(imConversation(oss)).toBe(false)
     expect(imWatched(oss, config)).toBe(false)
+  })
+})
+
+describe('a burst longer than one round of pages', () => {
+  it('catches up from the oldest page, so nothing is skipped and the order holds', async () => {
+    vi.useFakeTimers()
+    // Twelve messages, one per page, from time 1100 to 2200; the cursor sits at 1000.
+    const burst = Array.from({ length: 12 }, (_value, index) => ({ messageId: 100 + index, senderId: 42,
+      messageTime: 1100 + index * 100, messageType: 'T', content: `m${index}` }))
+    const ctx = loopContext({}, { chats: [{ sessionId: 's1', listen: 'mentions' as const }], directMessages: false,
+      otherChats: 'none' as const, pollSeconds: 10, readPageSize: 1 }, new Map([['im-cursor:s1', 1000]]))
+    // A page holds the message just older than its cursor, as 企信 returns them newest first.
+    ctx.value.commands.run = vi.fn(async (_program: string, args: string[]) => {
+      if (args[0] === 'auth') return JSON.stringify({ userId: 9766, userName: '斯作益seth' })
+      if (args[0] === 'im' && args[1] === 'session') return JSON.stringify({ sessions: [{ sessionId: 's1', sessionCategory: 'T', participants: [], lastMessageTime: 1000 }] })
+      const from = args.includes('--fromMessageId') ? args[args.indexOf('--fromMessageId') + 1]! : ''
+      if (!from) return JSON.stringify({ messages: [burst.at(-1)] })
+      const index = burst.findIndex(message => String(message.messageId) === from)
+      return JSON.stringify({ messages: index > 0 ? [burst[index - 1]] : [] })
+    })
+    const controller = new AbortController()
+    const running = runIm(ctx.value, controller.signal)
+    await vi.advanceTimersByTimeAsync(1_000)
+    // The ten pages end at m2: only that oldest page is ingested, and the cursor follows it rather than the newest message.
+    expect(ctx.receive.mock.calls.map(call => call[0].text)).toEqual(['m2'])
+    expect(ctx.state.get('im-cursor:s1')).toBe(1300)
+    // The next round catches up with the rest, still in order.
+    await vi.advanceTimersByTimeAsync(11_000)
+    expect(ctx.receive.mock.calls.map(call => call[0].text)).toEqual(['m2', 'm3', 'm4', 'm5', 'm6', 'm7', 'm8', 'm9', 'm10', 'm11'])
+    controller.abort(); await running
+    vi.useRealTimers()
   })
 })
