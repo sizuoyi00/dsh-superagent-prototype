@@ -1,6 +1,6 @@
 /** Word counting and string formatting utilities for IM message limits and templates. */
 const words = new Intl.Segmenter('zh', { granularity: 'word' })
-export const IM_WORDS = 1000
+export const IM_WORDS = 300
 export const NOTE_WORDS = 30
 /** Counts word-like segments across Chinese, English, and mixed text, ignoring punctuation. */
 export function wordCount(text: string): number {

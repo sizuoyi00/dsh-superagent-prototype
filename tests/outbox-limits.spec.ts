@@ -8,6 +8,6 @@ it('describes an aggregate by its causes', () => {
   expect(described(aggregate)).toContain('Stopping the background work of worker-1 failed')
   expect(described(aggregate)).toContain('cause: Error: job gone')
   expect(described(aggregate)).toContain('cause: TypeError: wrong shape')
-  // The guard allows 1000 words; past it a message is refused permanently rather than retried.
-  expect(() => checkedImText('字 '.repeat(1001))).toThrow(Permanent)
+  // The guard allows 300 words; past it a message is refused permanently rather than retried.
+  expect(() => checkedImText('字 '.repeat(301))).toThrow(Permanent)
 })
