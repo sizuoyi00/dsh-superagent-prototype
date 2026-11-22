@@ -415,6 +415,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
 | `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |
 | `tests/im-replay.spec.ts` | Recorded 企信 history replayed through the real mapping, Policy and Engine: which message becomes a Ticket, its assignment, its acknowledgement and its reply |
+| `tests/im-rtc.spec.ts` | The RTC payload a 企信 reply goes out as: markdown body, hidden header and footer, reply target |
 | `tests/im-trigger.spec.ts` | 企信 messages as Triggers: text, thread, addressed, own messages, one id per version |
 | `tests/schedule.spec.ts` | The Schedule Source: cron parsing, the next firing, the Trigger one firing builds, and its settings |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |

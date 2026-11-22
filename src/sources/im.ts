@@ -115,10 +115,10 @@ export const imKind: SourceKind<ImConfig> = {
     async send(host, message: OutboundMessage) {
       const { sessionId, messageId } = message.channel.address
       if (!sessionId) throw new Error('Missing 企信 reply target')
-      // Markdown on: 企信 renders the reply as its rich-text card, which the operator asked for.
-      const args = ['im', 'message', 'send-txt', '--sessionId', sessionId, '--text', checkedImText(message.text), '--markdownFormat', 'true']
-      if (messageId) args.push('--replyMessageId', messageId)
-      try { await host.commands.run(CLI, args) }
+      const text = checkedImText(message.text)
+      employee ||= `E.fs.${(await readSelf(host.commands)).id}`
+      const payload = rtcPayload(text, sessionId, employee, messageId)
+      try { await host.commands.run(CLI, ['im', 'message', 'send', '--data', JSON.stringify(payload)]) }
       catch (error) {
         // A recalled message, a session the agent left, or a message it may no longer see: the reply can never arrive.
         if (error instanceof CliError && /not found|不存在|无权限|forbidden/i.test(error.message)) return 'gone'
@@ -177,6 +177,25 @@ const imTriggerIdOf = (messageId: string): string => `${SOURCE}-message:${messag
 const imContextMessage = (message: ImMessage): ContextMessage => { const quote = imQuote(message)
   return { id: String(message.messageId), from: message.senderName ?? String(message.senderId),
     at: new Date(message.messageTime).toISOString(), text: imText(message), ...quote ? { reply_to: String(quote.messageId) } : {} } }
+
+
+/** The agent's own full employee id, learned from `auth status`, for the RTC send path. */
+let employee = ''
+/** A rich-text body that renders markdown: one text node, which keeps paragraphs apart in 企信. */
+const rtcBody = (text: string) => ({ type: 'doc', content: [{ append: false, index: -1, type: 'text', supportMarkdown: true, text,
+  marks: [{ type: 'textStyle', attrs: { color: '#181C25', fontSize: '13px' }, attrsForMobile: { color: '#181C25', fontSize: '13px' } }] }] })
+/**
+ * The RTC envelope `im message send --data` takes: a markdown body and hidden header/footer. `--markdownFormat` on
+ * `send-txt` folds a whole reply into one paragraph, which is why replies go through this message type instead.
+ */
+export function rtcPayload(text: string, sessionId: string, employeeId: string, replyTo?: string) {
+  const rtc = { header: { content: JSON.stringify({ type: 'doc', content: [] }), headerBizTitle: 'AI_AGENT_BIZ', hide: true },
+    body: { content: JSON.stringify(rtcBody(text)), hasRichText: true },
+    footer: { content: JSON.stringify({ type: 'doc', content: [] }), hide: true },
+    link: '', mobileLink: '', mockText: true, disableGlobalUrl: true, version: 'V2' }
+  return { sessionId, messageType: 'RTC', messageContent: JSON.stringify(rtc), env: 0, 'authInfo.employeeId': employeeId,
+    ...replyTo ? { replyMessageId: Number(replyTo) } : {} }
+}
 
 export const name = 'dsh-superagent-im'
 export const inject = ['orchestrator']
