@@ -702,6 +702,7 @@ const TEXT = {
   'userError.unknownPromptRevision': ['没有提示词版本 {revision}。', USER_ERRORS.unknownPromptRevision[1]],
   'userError.unknownPromptPart': ['没有内置提示词段落 {part}。', USER_ERRORS.unknownPromptPart[1]],
   'userError.ticketEnded': ['工单已结束。', USER_ERRORS.ticketEnded[1]],
+  'userError.attachmentOutsideTicket': ['回复的附件必须是工单目录里的文件。', USER_ERRORS.attachmentOutsideTicket[1]],
   'userError.assignmentEnded': ['这个派工已结束，工单已由较新的派工接手。', USER_ERRORS.assignmentEnded[1]],
   'userError.evalFinished': ['评估 {eval} 已结束，或已被之后的评估取代；请对这个触发当前的评估做决定。', USER_ERRORS.evalFinished[1]],
   'userError.notAdmissible': ['这个触发未通过准入：{reason}', USER_ERRORS.notAdmissible[1]],

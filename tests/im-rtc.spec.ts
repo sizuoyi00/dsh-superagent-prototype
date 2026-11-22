@@ -24,3 +24,13 @@ describe('the RTC reply payload', () => {
     expect(rtc.version).toBe('V2')
   })
 })
+
+/** A reply may carry files: the channel uploads each and sends it before the text. */
+import { readFileSync as readSource } from 'node:fs'
+import { expect as expectCode, it as itCode } from 'vitest'
+itCode('uploads each attachment and sends it before the text', () => {
+  const source = readSource(new URL('../src/sources/im.ts', import.meta.url), 'utf8')
+  expectCode(source).toContain("['file', 'upload', '--file', file.path]")
+  expectCode(source).toContain("'send-file', '--sessionId', sessionId, '--path', uploaded.path, '--fileName', file.name")
+  expectCode(source.indexOf("send-file")).toBeLessThan(source.indexOf("'im', 'message', 'send'"))
+})

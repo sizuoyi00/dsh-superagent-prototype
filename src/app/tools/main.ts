@@ -229,10 +229,18 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
         purpose: z.enum(['answer', 'result', 'attention']),
         human_action: z.string().trim().min(1).optional().describe('Required for attention: the ticket\'s current attention question.'),
         text: z.string().min(1).max(20000),
+        attachments: z.array(z.object({ path: z.string().min(1), name: z.string().min(1).max(120) }).strict()).max(5).optional()
+          .describe('Files to send with the reply, such as a report the worker wrote. Each path must be inside the ticket directory.'),
       }).strict(),
       execute: async args => {
+        const ticketId = args.ticket_id
+        const directory = args.attachments?.length && ticketId ? host.store.tickets.get(ticketId)?.execution?.directory : undefined
+        if (args.attachments?.length && (!directory || args.attachments.some(file => !file.path.startsWith(directory + '/')))) {
+          throw new UserError('attachmentOutsideTicket')
+        }
         const reply = host.engine.reply({ purpose: args.purpose, text: args.text, ...(args.trigger_id ? { triggerId: args.trigger_id } : {}),
-          ...(args.ticket_id ? { ticketId: args.ticket_id } : {}), ...(args.human_action ? { question: args.human_action } : {}) })
+          ...(args.ticket_id ? { ticketId: args.ticket_id } : {}), ...(args.human_action ? { question: args.human_action } : {}),
+          ...(args.attachments?.length ? { attachments: args.attachments } : {}) })
         await host.sendReplies()
         return { status: host.store.replyStatus(reply.id) ?? reply.status }
       },

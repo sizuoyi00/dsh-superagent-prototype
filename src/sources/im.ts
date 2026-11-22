@@ -117,6 +117,12 @@ export const imKind: SourceKind<ImConfig> = {
       if (!sessionId) throw new Error('Missing 企信 reply target')
       const text = checkedImText(message.text)
       employee ||= `E.fs.${(await readSelf(host.commands)).id}`
+      // Files first, so the text that describes them follows them in the conversation.
+      for (const file of message.attachments ?? []) {
+        const uploaded = z.object({ path: z.string().regex(/^(TN?|N)_[A-Za-z0-9]+$/) }).parse(JSON.parse(await host.commands.run(CLI, ['file', 'upload', '--file', file.path])))
+        await host.commands.run(CLI, ['im', 'message', 'send-file', '--sessionId', sessionId, '--path', uploaded.path, '--fileName', file.name])
+      }
+      if (!text.trim()) return 'sent'
       const payload = rtcPayload(text, sessionId, employee, messageId)
       try { await host.commands.run(CLI, ['im', 'message', 'send', '--data', JSON.stringify(payload)]) }
       catch (error) {
