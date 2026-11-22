@@ -26,6 +26,12 @@ const STATUS_REQUEST = 'Report the current ticket status with orchestrator_repor
  * Coordinates with Replies for the acknowledgement an accept carries and with Executor to start, deliver to, and stop assignments.
  * Intake, Evals, Assignments, and Engine delegate ticket and subscription mutations here.
  */
+/** A receipt names the ticket it is for, so the person can quote it later; the number exists only once the ticket does. */
+export function withTicketKey(text: string, number: number): string {
+  const key = `SU-${number}`
+  return text.includes(key) ? text : `${text.trimEnd()}（${key}）`
+}
+
 export class Tickets extends EnginePart {
   constructor(options: EngineOptions, private readonly replies: Replies) { super(options) }
 
@@ -52,7 +58,7 @@ export class Tickets extends EnginePart {
     const assignment = this.newAssignment(ticket)
     this.repo.tickets.save(ticket)
     for (const triggerId of triggerIds) for (const ref of this.repo.triggers.get(triggerId)?.threads ?? []) this.subscribe(id, ref)
-    if (outcome.acknowledgement && primary) this.replies.acknowledgeAccepted(id, primary, outcome.acknowledgement)
+    if (outcome.acknowledgement && primary) this.replies.acknowledgeAccepted(id, primary, withTicketKey(outcome.acknowledgement, number))
     this.options.executor.start(this.require(id), assignment)
     this.emit('ticket.created', { ticketId: id, decisionId, strength: mandate.strength })
   }

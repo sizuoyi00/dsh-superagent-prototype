@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Engine, MemoryRepositories, UserError, followupOwners, key, runningAssignment, ticketOutcome, ticketStage,
-  waitsForPerson } from '../src/core/index.ts'
+  waitsForPerson, withTicketKey } from '../src/core/index.ts'
 import type { Assessor, Assignment, Candidate, EngineOptions, Executor, OutboundMessage, Outcome, Policy, Ticket, Trigger } from '../src/core/index.ts'
 
 const member = { source: 'chat', id: 'alice' }
@@ -121,7 +121,7 @@ describe('eval', () => {
     expect(ticket).not.toHaveProperty('ended')
     expect(ticket.assignments).toEqual([expect.objectContaining({ state: 'running', startedAt: expect.any(String) })])
     expect(h.repo.threads.get('chat:t1')?.subscriptions).toEqual([ticket.id])
-    expect(h.outbox).toEqual([{ id: key('ack', '1'), channel: trigger('1').channel, text: 'ok', kind: 'acknowledgement', ticketId: ticket.id }])
+    expect(h.outbox).toEqual([{ id: key('ack', '1'), channel: trigger('1').channel, text: 'ok（SU-1）', kind: 'acknowledgement', ticketId: ticket.id }])
     expect(h.executor.start).toHaveBeenCalledOnce()
   })
   it('refuses to decide an eval that a later eval replaced, and decides the later one', async () => {
@@ -955,7 +955,7 @@ describe('direct decisions', () => {
     const second = h.decide(h.requests.at(-1)!, { kind: 'accept', title: 'Other', scope: 'small', reason: 'routed', acknowledgement: 'On it' })
     expect(second.ticketId).not.toBe(first.ticketId)
     expect(h.repo.tickets.get(second.ticketId!)!.origin).toEqual({ triggerId: '2', triggerIds: ['2'] })
-    expect(h.outbox.find(message => message.id === key('ack', '2'))).toMatchObject({ text: 'On it', kind: 'acknowledgement' })
+    expect(h.outbox.find(message => message.id === key('ack', '2'))).toMatchObject({ text: 'On it（SU-2）', kind: 'acknowledgement' })
     // The replayed request still answers with the ticket it started.
     expect(h.engine.decide('1', { kind: 'accept', title: 'Again', scope: 'small', reason: 'again' })).toEqual(first)
   })
@@ -1013,7 +1013,7 @@ describe('replies', () => {
     const ticketId = accepted(h).ticketId!
     // The acknowledgement of the accept stays; a later request for one reuses it.
     expect(h.engine.reply({ purpose: 'acknowledgement', ticketId, triggerId: '1', text: 'On it' })).toEqual({ id: key('ack', '1'), status: 'pending', reused: true })
-    expect(h.outbox.map(message => message.text)).toEqual(['ok'])
+    expect(h.outbox.map(message => message.text)).toEqual(['ok（SU-1）'])
     h.engine.receive(trigger('2', { actor: guest }))
     expect(h.engine.reply({ purpose: 'acknowledgement', ticketId, triggerId: '2', text: 'Looking' })).toEqual({ id: key('ack', '2'), status: 'pending', reused: false })
     h.engine.receive(trigger('3', { human: false }))
@@ -1629,4 +1629,9 @@ it('numbers each ticket once, so a person can quote it', () => {
   h.settle()
   // Newest first, and the second ticket carries the next number.
   expect(h.repo.tickets.list().map(ticket => ticket.number)).toEqual([2, 1])
+})
+
+it('names the ticket in its receipt, since the number exists only once the ticket does', () => {
+  expect(withTicketKey('On it', 7)).toBe('On it（SU-7）')
+  expect(withTicketKey('On it（SU-7）', 7)).toBe('On it（SU-7）')
 })
