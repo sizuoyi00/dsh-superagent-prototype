@@ -381,13 +381,20 @@ a.dt-btn, a.dt-btn:hover { text-decoration: none; }
 .dt-info-warn { color: var(--dsw-alias-state-warn-primary); }
 .dt-field-segmented { max-width: 240px; }
 /* My work board: five stage columns. Stages are derived, so a column reads as a status, not a drop target. */
-.dt-board { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; align-items: start; }
-.dt-board-column { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
-.dt-board-column .dt-list { margin: 0; gap: 4px; }
-.dt-board-column .dt-row { padding: 8px 6px; }
-.dt-board-column .dt-ticket-meta { font-size: 11px; line-height: 16px; }
+/* The board needs the width of five columns, so its page is wider than a settings page. */
+.dt-column-wide { max-width: none; }
+.dt-board { display: grid; grid-template-columns: repeat(5, minmax(200px, 1fr)); gap: 12px; align-items: start; overflow-x: auto; padding-bottom: 8px; }
+.dt-board-column { min-width: 0; display: flex; flex-direction: column; gap: 8px; overflow: hidden; }
+.dt-board-column .dt-list { margin: 0; gap: 6px; }
+/* A card stacks its stage above its body, because 200px cannot hold the ticket rail beside the text. */
+.dt-board .dt-list > .dt-ticket { grid-template-columns: minmax(0, 1fr); row-gap: 2px; padding: 10px 8px; }
+.dt-board .dt-ticket-stage { border-right: 0; padding-bottom: 2px; }
+.dt-board .dt-ticket-body .dt-row-title .dt-open { white-space: normal; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.dt-board .dt-ticket-body .dt-row-title .dt-open::after { content: none; }
+.dt-board .dt-ticket-meta { flex-wrap: wrap; white-space: normal; font-size: 11px; line-height: 16px; }
+.dt-board .dt-ticket-actions { min-height: 0; }
 @container (max-width: 760px) {
-  .dt-board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dt-board { grid-template-columns: repeat(2, minmax(180px, 1fr)); }
 }
 @container (max-width: 460px) {
   .dt-board { grid-template-columns: minmax(0, 1fr); }

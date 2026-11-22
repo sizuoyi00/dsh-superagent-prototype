@@ -161,7 +161,7 @@ function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab
     }
   })()
   return <div className="dt-page">
-    <div className="dt-column">
+    <div className={route.page === 'board' ? 'dt-column dt-column-wide' : 'dt-column'}>
       <Header masterId={state?.masterId} />
       {error && state && <p className="dt-error" role="status">{error.message}</p>}
       <SegmentedTabs className="dt-tabs" label={t('pagesLabel')} value={route.page} onChange={openTab}
