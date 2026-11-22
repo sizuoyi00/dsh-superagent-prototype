@@ -71,8 +71,9 @@ describe('the Trigger one message builds', () => {
 })
 
 describe('own messages', () => {
-  it('drops what the agent itself sent', () => {
-    expect(imOwn(message({ senderId: self.id }), self)).toBe(true)
+  it('drops only what the AI send path produced, and answers what the person typed in their own client', () => {
+    expect(imOwn(message({ senderId: self.id, tagFromLabel: '本内容由 ShareAgent 生成' }), self)).toBe(true)
+    expect(imOwn(message({ senderId: self.id }), self)).toBe(false)
     expect(imOwn(message(), self)).toBe(false)
   })
 })
@@ -93,14 +94,15 @@ describe('the loop', () => {
   it('ingests messages after the cursor oldest first, skips its own, and advances the cursor', async () => {
     vi.useFakeTimers()
     const ctx = loopContext({ s1: [
+      { messageId: 14, senderId: 9766, messageTime: 1250, messageType: 'T', content: '我自己说的一句' },
       { messageId: 13, senderId: 42, messageTime: 1300, messageType: 'T', content: '@斯作益seth 三' },
-      { messageId: 12, senderId: 9766, messageTime: 1200, messageType: 'T', content: '二' },
+      { messageId: 12, senderId: 9766, messageTime: 1200, messageType: 'T', content: '二', tagFromLabel: '本内容由 ShareAgent 生成' },
       { messageId: 11, senderId: 42, messageTime: 1100, messageType: 'T', content: '一' },
     ] }, config, new Map([['im-cursor:s1', 1050]]))
     const controller = new AbortController()
     const running = runIm(ctx.value, controller.signal)
     await vi.advanceTimersByTimeAsync(20_000)
-    expect(ctx.receive.mock.calls.map(call => call[0].text)).toEqual(['一', '@斯作益seth 三'])
+    expect(ctx.receive.mock.calls.map(call => call[0].text)).toEqual(['一', '我自己说的一句', '@斯作益seth 三'])
     expect(ctx.state.get('im-cursor:s1')).toBe(1300)
     controller.abort(); await running
     vi.useRealTimers()

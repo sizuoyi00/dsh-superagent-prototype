@@ -36,6 +36,8 @@ export const ImMessageSchema = z.looseObject({
   atList: z.array(z.unknown()).nullish(),
   mentionList: z.array(z.unknown()).nullish(),
   atFullUserIdList: z.array(z.string()).nullish(),
+  /** Set by the AI send path, for example `本内容由 ShareAgent 生成`; a message a person typed has none. */
+  tagFromLabel: z.string().nullish(),
 })
 export type ImMessage = z.infer<typeof ImMessageSchema>
 /** What the Source knows about its own identity, so it can drop its own messages and recognize messages addressed to it. */
@@ -51,8 +53,11 @@ export function imText(message: ImMessage): string {
 /** The message this one quotes, when 企信 returned it. */
 export const imQuote = (message: ImMessage): z.infer<typeof ImQuoteSchema> | undefined =>
   message.replyMessageVo ?? message.replyMessage ?? message.quoteMessageVo ?? undefined
-/** True when the message was sent by the Source's own identity, which it never receives. */
-export const imOwn = (message: ImMessage, self: ImSelf): boolean => message.senderId === self.id
+/**
+ * True when the message was sent by the agent itself: the account's own id together with the AI marker the send path
+ * appends. The account's own id alone means the person wrote it in their own client, which the agent does answer.
+ */
+export const imOwn = (message: ImMessage, self: ImSelf): boolean => message.senderId === self.id && !!message.tagFromLabel
 /**
  * 企信 session kinds: `D` is a group, `S` a direct chat, `C` a parent of a cross-enterprise conversation, and `OSS1`,
  * `BOT`, `TODO`, `CRM`, `SS` are system channels. A direct chat carries no mention, so every message in it is addressed.

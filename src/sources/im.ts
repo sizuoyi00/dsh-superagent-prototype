@@ -6,7 +6,7 @@ import { CliError, validItems } from '../infra/commands.ts'
 import { checkedImText } from '../infra/text.ts'
 import { KV } from '../kv.ts'
 import { sourceContext, type SourceContext } from './host.ts'
-import { DIRECT, imQuote, imText, imTrigger, imThreadId, ImMessageSchema, ImSessionSchema, SOURCE, type ImMessage, type ImSelf } from './im-trigger.ts'
+import { DIRECT, imOwn, imQuote, imText, imTrigger, imThreadId, ImMessageSchema, ImSessionSchema, SOURCE, type ImMessage, type ImSelf } from './im-trigger.ts'
 import type { ContextMessage, SourceKind } from './kind.ts'
 import { pause } from './poll.ts'
 
@@ -241,11 +241,13 @@ async function pollSession(ctx: SourceContext, config: ImConfig, self: ImSelf, s
   const window = reached ? pages.flat() : pages.at(-1) ?? []
   const ordered = window.filter(message => message.messageTime > since).sort((left, right) => left.messageTime - right.messageTime)
   for (const message of ordered) {
-    if (message.senderId === self.id) {
+    if (imOwn(message, self)) {
       // The agent's own messages carry the display name people mention; learning it makes "@ me" work.
       if (message.senderName && !self.names.includes(message.senderName)) self.names.push(message.senderName)
       continue
     }
+    // A message the account wrote itself is answered like anyone else's, and teaches the name a mention uses.
+    if (message.senderId === self.id && message.senderName && !self.names.includes(message.senderName)) self.names.push(message.senderName)
     const trigger = imTrigger(session, message, self)
     ctx.threads.describe(`${SOURCE}:${imThreadId(session, message)}`, { label: session.sessionName ?? session.sessionId })
     await ctx.receive(trigger)
