@@ -116,9 +116,12 @@ export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutco
   const assignment = ticket.mandate.strength === 'inferred' && ruleIds
     ? `Proactively accepted under ${ruleIds.join(', ')}. Scope: ${outcome.scope}.${precedence}${note}`
     : note.trim()
-  // A role prefix in the title groups the ticket's workspace, so the execution root stays readable.
+  // A role prefix in the title selects that role's workspace: the Session runs in the shared role directory and keeps
+  // each ticket's checkout in its own subdirectory, so the workspace list stays at one entry per role.
   const folder = roleFolder(ticket.title)
-  return { name, directory: join(executionRoot(settings, stateDir), ...folder ? [folder] : [], name), assignment }
+  const root = executionRoot(settings, stateDir)
+  const worktree = join(root, ...folder ? [folder] : [], name)
+  return { name, directory: folder ? join(root, folder) : worktree, worktree, assignment }
 }
 /** Character limits for inline assignment and trigger text in worker messages; longer text is read via its resource. */
 const ASSIGNMENT_CHARS = 1500, TRIGGER_CHARS = 600
@@ -209,17 +212,18 @@ export class WorkerSlots {
   free(ticketId: string): void { this.starting.delete(ticketId) }
 }
 
+/** A failure's own message plus what it wrapped, so an AggregateError does not hide the reason it is reported for. */
+export function described(error: unknown): string {
+  if (!(error instanceof AggregateError)) return String(error)
+  return [String(error), ...[...error.errors].map(inner => `cause: ${String(inner)}`)].join('; ')
+}
+
 /**
  * Executes ticket assignments in persistent per-ticket DSH worker sessions and isolated workspace directories.
  * Queues launches and input deliveries through Effects, manages concurrency with WorkerSlots, listens for `agent/status`,
  * `agent/inbox/claimed`, `session/event` and `agent/error` events on the Cordis context, and reports status transitions back to Engine.
  * Runtime, Engine, worker tools, and management routes use this class to prepare, launch, deliver to, stop, and resume ticket assignments.
  */
-/** A failure's own message plus what it wrapped, so an AggregateError does not hide the reason it is reported for. */
-export function described(error: unknown): string {
-  if (!(error instanceof AggregateError)) return String(error)
-  return [String(error), ...[...error.errors].map(inner => `cause: ${String(inner)}`)].join('; ')
-}
 
 export class DshExecutor implements Executor {
   private readonly disposers: (() => void)[] = []

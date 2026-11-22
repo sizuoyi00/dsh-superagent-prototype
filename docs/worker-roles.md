@@ -18,6 +18,10 @@
 - 本部署**没有 TAPD MCP**，不要找 `mcp__` 工具。
 - 企信、K8s、Kdocs、Grafana 分别用 `sharecrm`、`fs-k8s-cli`、`kdocs-cli`、`loom-grafana`。
 
+## 工作目录（必读）
+
+Session 的当前目录是**角色工作区**（例如 `src/troubleshoot`），里面可能有多张工单。**你的工单代码检出在 `$DSH_SUPERAGENT_WORKTREE`**——所有代码、git、测试命令都要在那个目录里执行（`cd "$DSH_SUPERAGENT_WORKTREE"` 或用工具的 workdir）。不要在角色工作区根目录里建文件或跑 git。
+
 ## 通用约定（四份技能都遵守）
 
 - 你只能**写报告**：结论、证据、下一步都写进报告；**不要给任何人发企信/TAPD 消息**，对外说话由 root 负责。
