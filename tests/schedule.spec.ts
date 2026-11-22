@@ -52,9 +52,12 @@ describe('the Trigger one firing builds', () => {
     const fire = at('2026-11-22T10:15:00')
     const trigger = scheduleTrigger('schedule', config, fire)
     expect(trigger).toMatchObject({ source: 'schedule', human: true, addressed: 'direct', text: 'Check the dependencies.',
-      actor: { source: 'schedule', id: 'me' }, threads: [{ source: 'schedule', id: 'schedule' }], at: fire.toISOString() })
+      actor: { source: 'schedule', id: 'me' }, threads: [{ source: 'schedule', id: `schedule:${fire.toISOString()}` }], at: fire.toISOString() })
     expect(scheduleTrigger('schedule', config, fire).id).toBe(trigger.id)
     expect(scheduleTrigger('schedule', config, at('2026-11-22T10:30:00')).id).not.toBe(trigger.id)
+    // Each firing gets its own Thread, so a changed instruction starts a new Ticket.
+    expect(scheduleTrigger('schedule', config, at('2026-11-22T10:30:00')).threads[0]!.id)
+      .not.toBe(trigger.threads[0]!.id)
   })
 })
 

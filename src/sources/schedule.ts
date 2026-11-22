@@ -77,10 +77,13 @@ const ConfigSchema = z.object({
   instruction: z.string().trim().max(2000).default(''),
 }).strict()
 export type ScheduleConfig = z.infer<typeof ConfigSchema>
-/** Builds one firing's Trigger; its ID is the firing minute, so the same minute is ingested once. */
+/**
+ * Builds one firing's Trigger; its ID is the firing minute, so the same minute is ingested once. Each firing gets its own
+ * Thread, so a changed instruction starts a new Ticket instead of being handed to the one a previous firing opened.
+ */
 export function scheduleTrigger(instance: string, config: ScheduleConfig, fireAt: Date): Trigger {
   const at = fireAt.toISOString()
-  return { id: key('schedule', instance, at), source: SOURCE, threads: [{ source: SOURCE, id: instance }],
+  return { id: key('schedule', instance, at), source: SOURCE, threads: [{ source: SOURCE, id: `${instance}:${at}` }],
     actor: { source: SOURCE, id: config.actor }, human: true, at, text: config.instruction, addressed: 'direct',
     meta: { instance, cron: config.cron, fire: at } }
 }
@@ -168,7 +171,7 @@ export async function runSchedule(ctx: SourceContext, signal: AbortSignal): Prom
     const at = pending.at
     pending = undefined
     ctx.state.set(fired(SOURCE), at.toISOString())
-    ctx.threads.describe(threadKey({ source: SOURCE, id: SOURCE }), { label: `Schedule ${config.cron}` })
+    ctx.threads.describe(threadKey({ source: SOURCE, id: `${SOURCE}:${at.toISOString()}` }), { label: `Schedule ${config.cron} ${at.toISOString()}` })
     await ctx.receive(scheduleTrigger(SOURCE, config, at))
   }
 }
