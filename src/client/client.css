@@ -399,3 +399,5 @@ a.dt-btn, a.dt-btn:hover { text-decoration: none; }
 @container (max-width: 460px) {
   .dt-board { grid-template-columns: minmax(0, 1fr); }
 }
+/* A ticket's quotable key, shown before its title in lists and on its page. */
+.dt-key { margin-right: 6px; color: var(--dsw-alias-label-caption); font-variant-numeric: tabular-nums; font-weight: 400; }

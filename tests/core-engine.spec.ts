@@ -1619,3 +1619,14 @@ describe('ignores from the card', () => {
     expect(() => h.engine.decide('5', { kind: 'accept', title: 'Fix', scope: 'small', reason: 'chat' })).toThrow(new UserError('notExplicit'))
   })
 })
+
+it('numbers each ticket once, so a person can quote it', () => {
+  const h = harness()
+  accepted(h, '1', 't1')
+  h.engine.receive(trigger('2', { threads: [{ source: 'chat', id: 't2' }] }))
+  h.pump()
+  h.decide(h.requests.at(-1)!, { kind: 'accept', title: 'Second', scope: 'small', reason: 'requested', acknowledgement: 'ok' })
+  h.settle()
+  // Newest first, and the second ticket carries the next number.
+  expect(h.repo.tickets.list().map(ticket => ticket.number)).toEqual([2, 1])
+})

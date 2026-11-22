@@ -18,8 +18,8 @@ export function TicketLine({ ticket, question, onChanged, context }: {
   return <li className="dt-row dt-link dt-ticket" data-state={question ? status.dot : undefined}>
     <div className="dt-ticket-stage"><StageMark state={status.dot} icon={status.icon} label={status.label} /></div>
     <div className="dt-ticket-body">
-      <div className="dt-row-title"><button type="button" className="dt-open" onClick={() => navigate({ page: 'execution',
-        id: ticket.id })}>{ticket.title}</button></div>
+      <div className="dt-row-title">{ticket.key && <span className="dt-key">{ticket.key}</span>}
+        <button type="button" className="dt-open" onClick={() => navigate({ page: 'execution', id: ticket.id })}>{ticket.title}</button></div>
       <div className="dt-row-meta dt-ticket-meta">
         {ticket.threads.map(thread => <ThreadChip key={thread.key} thread={thread} />)}
         {context && <ContextTag />}
