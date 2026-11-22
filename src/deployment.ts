@@ -10,6 +10,23 @@ import { runAsWorker, sameDirectory, withoutDirectory, workerBin } from './infra
 import { SetupError } from './setup.ts'
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
+/**
+ * True when a probe failed for a reason that may pass on its own: a network timeout, a reset connection, a rate limit or
+ * a gateway error. A setup check retries those, so one hiccup does not leave the deployment unresolved and pause everything.
+ */
+const TRANSIENT = /TLS handshake|timeout|timed out|connection reset|connection refused|temporary failure|no such host|\bEOF\b|HTTP (?:429|500|502|503|504)\b/i
+export const transient = (error: unknown): boolean => TRANSIENT.test(reason(error))
+/** How long a retried probe waits before each further attempt; two retries keep a healthy start within a second. */
+export const RETRY_WAITS_MS = [250, 750]
+/** Runs a probe, retrying the reasons that may pass on their own. The last error is thrown once the retries are spent. */
+export async function probing(probe: Probe, argv: string[]): Promise<string> {
+  for (let attempt = 0; ; attempt++) {
+    try { return await probe(argv) } catch (error) {
+      if (attempt >= RETRY_WAITS_MS.length || !transient(error)) throw error
+      await new Promise(resolve => setTimeout(resolve, RETRY_WAITS_MS[attempt]))
+    }
+  }
+}
 const absolute = (description: string) => s.string().pattern(/^\//).description(`${description} Absolute path.`)
 /** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir` remounts the plugin. */
 export const Config = s.object({
@@ -92,11 +109,11 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
   if (!accounts.cli) throw new SetupError('agentCliUnset')
   let cli: string
   try { cli = executable(accounts.cli, path, workerBin(stateDir)) } catch (error) { throw new SetupError('agentCliMissing', { output: reason(error) }) }
-  const text = await probe([cli, 'api', 'user']).catch((error: unknown) => { throw new SetupError('agentCliSignedOut', { output: reason(error) }) })
+  const text = await probing(probe, [cli, 'api', 'user']).catch((error: unknown) => { throw new SetupError('agentCliSignedOut', { output: reason(error) }) })
   const agent = parsed(GithubUser, text)
   if (!agent) throw new SetupError('agentCliNoAccount')
   // Use the canonical repository name returned by GitHub so renamed repositories match incoming notifications.
-  const access = parsed(RepositoryAccess, await probe([cli, 'api', `repos/${remote}`, '--jq', '{name: .full_name, push: .permissions.push}']).catch((error: unknown) => {
+  const access = parsed(RepositoryAccess, await probing(probe, [cli, 'api', `repos/${remote}`, '--jq', '{name: .full_name, push: .permissions.push}']).catch((error: unknown) => {
     throw new SetupError('repositoryUnreadable', { account: agent.login, repository: remote, output: reason(error) })
   }))
   if (!access) throw new SetupError('repositoryUnreported', { repository: remote })

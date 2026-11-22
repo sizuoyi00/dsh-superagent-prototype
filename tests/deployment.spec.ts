@@ -83,6 +83,21 @@ describe('setup', () => {
     await needs('github', 'agentCliNoAccount', {}, { repository, cli: program(join(dir, 'bin', 'gh-anonymous'), `echo '{}'`) })
     expect(() => executable('nothing-here', join(dir, 'bin'))).toThrow('nothing-here is not an executable file on PATH')
   })
+
+  it('retries a probe that failed for a network reason, and stops at a permanent one', async () => {
+    const flaky = (file: string, stamp: string, body: string): string => program(file, `case "$*" in
+  "api user") echo '{"login":"Agent-Bot","id":7}' ;;
+  *) if [ -f '${stamp}' ]; then echo '{"name":"acme/widgets","push":true}' ; else touch '${stamp}'; echo '${body}' >&2; exit 1; fi ;;
+esac`)
+    const recovered = flaky(join(dir, 'bin', 'gh-flaky'), join(dir, 'tried'),
+      'Get "https://api.github.com/repos/acme/widgets": net/http: TLS handshake timeout')
+    await expect(resolveDeployment(machine(), { repository: 'acme/widgets', cli: recovered }, probe, path))
+      .resolves.toMatchObject({ repository: 'acme/widgets', github: expect.objectContaining({ login: 'Agent-Bot' }) })
+    // A permanent failure is named at once, without the retries a network failure gets.
+    const outsider = flaky(join(dir, 'bin', 'gh-outsider-2'), join(dir, 'never'), 'HTTP 404')
+    await expect(resolveDeployment(machine(), { repository: 'acme/widgets', cli: outsider }, probe, path))
+      .rejects.toEqual(setupError('github', 'repositoryUnreadable', { output: expect.stringContaining('HTTP 404') }))
+  })
   it('reads the Feishu bot from a bot-only lark-cli, or finds none when the Feishu Source names no CLI', async () => {
     expect(await resolveFeishuBot(machine(), {}, probe, path)).toBeUndefined()
     expect(await resolveFeishuBot(machine(), { cli: 'lark-cli' }, probe, path)).toEqual({ cli: join(dir, 'bin', 'lark-cli'), appId: 'cli_bot', brand: 'lark', botId: 'ou_bot', name: 'Widgets Bot' })
