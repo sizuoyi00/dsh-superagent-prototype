@@ -376,6 +376,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/feishu-read.ts` | The `feishu/` reads of a Trigger's message, its root, parent and topic, and `feishuThreadContext`, which gives them to assessments with their images |
 | `src/sources/im.ts` | The 企信 kind and plugin entry, exported as `./im-watch`: polling, cursors, the reply channel, and `runIm` |
 | `src/sources/im-trigger.ts` | 企信 sessions and messages as Triggers: text, thread anchor, addressed, and own messages |
+| `src/sources/manual.ts` | The Manual kind: local git projects a person picks in the panel, the Trigger one request becomes, and the project it exposes to prepare through `DSH_MANUAL_PROJECT` |
 | `src/sources/schedule.ts` | The Schedule kind and plugin entry, exported as `./schedule-watch`: a cron expression and a fixed instruction fired as Triggers, the next firing, and the last firing kept across restarts |
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
@@ -384,6 +385,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/provider.tsx` | What every page reads from its host: copy, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
 | `src/client/api.ts` | Calls and polls of the management API, typed by `src/app/api.ts`, and the Decision filters of the Eval status |
 | `src/client/route.ts` | The tabs, the settings groups, the typed routes that `parseRoute` reads, and the route memory with the settings group opened last |
+| `src/client/manual.tsx` | The manual request form: project, role and task text, posting one request to the panel's API |
 | `src/client/board.tsx` | The My work board: each Ticket in the column its stage puts it in, Source filters, and `boardColumn` |
 | `src/client/overview.tsx` | The overview |
 | `src/client/source.tsx`, `trigger.tsx`, `eval.tsx`, `execution.tsx` | One file per stage: its status, and its settings where it has some |
@@ -417,6 +419,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/im-replay.spec.ts` | Recorded 企信 history replayed through the real mapping, Policy and Engine: which message becomes a Ticket, its assignment, its acknowledgement and its reply |
 | `tests/im-rtc.spec.ts` | The RTC payload a 企信 reply goes out as: markdown body, hidden header and footer, reply target |
 | `tests/im-trigger.spec.ts` | 企信 messages as Triggers: text, thread, addressed, own messages, one id per version |
+| `tests/manual.spec.ts` | A manual request names its project and role, and never shares a ticket with another |
 | `tests/schedule.spec.ts` | The Schedule Source: cron parsing, the next firing, the Trigger one firing builds, and its settings |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |

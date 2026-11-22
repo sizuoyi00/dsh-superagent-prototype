@@ -5,6 +5,7 @@ import { key, threadKey, type Trigger } from '../core/index.ts'
 import { family } from '../kv.ts'
 import { sourceContext, type SourceContext } from './host.ts'
 import type { SourceKind } from './kind.ts'
+import { manualKind } from './manual.ts'
 import { pause } from './poll.ts'
 
 export const SOURCE = 'schedule'
@@ -130,6 +131,7 @@ export const name = 'dsh-superagent-schedule'
 export const inject = ['orchestrator']
 export function apply(ctx: Context): void {
   ctx.effect(() => ctx.orchestrator.sources.register(scheduleKind), 'schedule: source kind')
+  ctx.effect(() => ctx.orchestrator.sources.register(manualKind), 'manual: source kind')
   ctx.effect(() => {
     const source = sourceContext(ctx.orchestrator, scheduleKind)
     const controller = new AbortController()

@@ -8,6 +8,8 @@ import { sourceSkills } from './context.ts'
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
 import { PromptConflict, SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, builtInParts, defaultPrompts, savePrompts, type Prompts }
   from './prompts.ts'
+import { manualTrigger, type ManualConfig, type ManualRole } from '../sources/manual.ts'
+import type { Trigger } from '../core/index.ts'
 import { policyVersion } from '../policy.ts'
 import { SettingsConflict, type Settings } from './settings.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
@@ -37,6 +39,8 @@ export interface HttpHost {
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery'>
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
   readonly engine: EngineForPeople
+  /** Ingests a trigger the panel created, such as a manual request, through the same pass as a Source's intake. */
+  readonly receive: (trigger: Trigger) => unknown
   readonly executor: Pick<DshExecutor, 'activeCount'>
   readonly health: Record<string, Health>
   readonly machine: Machine
@@ -144,6 +148,8 @@ const DecisionsQuery = z.object({ kind: z.string().default(''), window: z.litera
   limit: limit(30, 200) })
 const count = z.coerce.number().int().nonnegative()
 const PromptsQuery = z.object({ revision: count.optional(), offset: count.default(0) })
+const ManualRequest = z.object({ project: z.string().trim().min(1), role: z.enum(['开发', '排查', '测试', '发布']),
+  text: z.string().trim().min(1).max(4000) }).strict()
 const SourceBlock = z.templateLiteral(['source:', z.string().regex(/^[a-z][a-z0-9-]*$/)])
 const SettingsBlockSchema = z.union([z.enum(['policy', 'eval', 'executor']), SourceBlock])
 const SaveRequest = z.object({ value: z.unknown(), revision: z.number().int().nonnegative() })
@@ -173,6 +179,17 @@ function routes(runtime: HttpHost): Routes {
     'POST threads/:key/unsubscribe': async ({ params }) => {
       const removed = runtime.engine.unsubscribe(params.key)
       return { removed, thread: params.key, context_delivery: await runtime.sessions.delivery(`subscription:${params.key}`) }
+    },
+    'POST manual/requests': async ({ body }) => {
+      const request = ManualRequest.parse(await body())
+      const instance = runtime.sources.instances().find(item => item.id === 'manual')
+      const config = (instance?.config ?? { projects: [] }) as ManualConfig
+      const project = config.projects.find((item: { path: string }) => item.path === request.project)
+      if (!project) throw new RouteError(400, 'Unknown project for a manual request')
+      const trigger = manualTrigger(config, { project: project.path, role: request.role as ManualRole, text: request.text })
+      runtime.receive(trigger)
+      runtime.requestPass()
+      return { trigger_id: trigger.id }
     },
     'POST triggers/:id/requeue': ({ params }) => {
       const queued = runtime.engine.reevaluate(params.id)
