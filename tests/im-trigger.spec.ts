@@ -199,3 +199,21 @@ describe('mention names', () => {
     expect(imAddressed(message('@AI分身'), group, { ...aliasSelf, names: ['斯作益seth'] })).toBeUndefined()
   })
 })
+
+describe('rich messages', () => {
+  const rich = (elements: unknown[], messageType = 'MIX') => ImMessageSchema.parse({ messageId: 50, senderId: 42, messageTime: 1795200000000,
+    messageType, content: JSON.stringify({ elements }) })
+  it('reads the text a card carries, which is often the only place a request is written', () => {
+    expect(imText(rich([{ type: 'I', content: '{"Image":"N_x.png"}' },
+      { type: 'T', content: '以上配置未去掉1121版本变量的灰度，请确认' }])))
+      .toBe('[图片]\n以上配置未去掉1121版本变量的灰度，请确认')
+  })
+  it('names an image without text instead of dropping the message', () => {
+    expect(imText(rich([{ type: 'I', content: '{"Image":"N_x.png"}' }]))).toBe('[图片]')
+    expect(imText(rich([{ type: 'I', content: '{}' }, { type: 'I', content: '{}' }]))).toBe('[图片×2]')
+  })
+  it('treats a card text element as addressed when it mentions the agent', () => {
+    const card = rich([{ type: 'T', content: '@斯作益seth 请确认' }])
+    expect(imAddressed(card, ImSessionSchema.parse({ sessionId: 'g1', sessionCategory: 'D', participants: [] }), self)).toBe('mention')
+  })
+})

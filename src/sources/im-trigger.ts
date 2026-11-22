@@ -44,11 +44,36 @@ export type ImMessage = z.infer<typeof ImMessageSchema>
 export interface ImSelf { id: number; fullId: string; names: string[] }
 /** Placeholder for a message type without text, so meaning is preserved without reading the payload. */
 const PLACEHOLDER: Record<string, string> = { I: '[图片]', F: '[文件]', V: '[语音]', MIX: '[图文]', UGT: '[卡片]', RTC: '[卡片]', S: '[系统消息]' }
-/** The readable text of a message: its content for text, a placeholder otherwise. */
+/** The readable text of a message: its content for text, the text elements of a rich message, a placeholder otherwise. */
 export function imText(message: ImMessage): string {
   const content = message.content ?? ''
   if (message.messageType === 'T') return content
+  const rich = richMessage(content)
+  if (rich) return rich
   return PLACEHOLDER[message.messageType] ?? `[${message.messageType}]`
+}
+/**
+ * A rich message keeps its parts in `elements`: `T` holds text, `I` an image. The caption of a card is often the only
+ * place a request is written, so it becomes the message's text and an image is named beside it.
+ */
+function richMessage(content: string): string | undefined {
+  let value: unknown
+  try { value = JSON.parse(content) } catch { return undefined /* Not a rich message; the caller uses a placeholder. */ }
+  const elements = (value as { elements?: unknown }).elements
+  if (Array.isArray(elements)) {
+    const texts: string[] = []
+    let images = 0
+    for (const element of elements) {
+      if (!element || typeof element !== 'object') continue
+      const { type, content: body } = element as { type?: unknown; content?: unknown }
+      if (type === 'T' && typeof body === 'string' && body.trim()) texts.push(body.trim())
+      if (type === 'I') images++
+    }
+    const parts = [...images ? [`[图片${images > 1 ? `×${images}` : ''}]`] : [], ...texts]
+    return parts.length ? parts.join('\n') : undefined
+  }
+  const text = (value as { text?: unknown }).text
+  return typeof text === 'string' && text.trim() ? text.trim() : undefined
 }
 /** The message this one quotes, when 企信 returned it. */
 export const imQuote = (message: ImMessage): z.infer<typeof ImQuoteSchema> | undefined =>
