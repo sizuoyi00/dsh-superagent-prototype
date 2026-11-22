@@ -53,12 +53,17 @@ export async function listMessages(commands: SourceContext['commands'], sessionI
   return validItems(ImMessageSchema, page.messages)
 }
 /** Whether the Source receives this session: a configured chat, or any direct chat when direct messages are on. */
-/** Only a group (`D`) or a direct chat (`S`) is a conversation people address the agent in; system channels are never read. */
+/**
+ * A group (`D`), a direct chat (`S`) or a bot conversation (`BOT`) is a conversation a person addresses the agent in;
+ * service and system channels (`OSS1`, `SS`, `CRM`, `TODO`) are never read.
+ */
+export const BOT = 'BOT'
 export const imConversation = (session: z.infer<typeof ImSessionSchema>): boolean =>
-  session.sessionCategory === 'D' || session.sessionCategory === DIRECT
+  session.sessionCategory === 'D' || session.sessionCategory === DIRECT || session.sessionCategory === BOT
 export const imWatched = (session: z.infer<typeof ImSessionSchema>, config: ImConfig): boolean => imConversation(session)
   && (config.chats.some(chat => chat.sessionId === session.sessionId)
-    || (session.sessionCategory === DIRECT ? config.directMessages : config.otherChats === 'mentions'))
+    || (session.sessionCategory === DIRECT || session.sessionCategory === BOT
+    ? config.directMessages : config.otherChats === 'mentions'))
 /** The rule the configured chats give this session, when it is one of them. */
 const chatRule = (sessionId: string, config: ImConfig) => config.chats.find(chat => chat.sessionId === sessionId)
 

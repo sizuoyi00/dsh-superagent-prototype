@@ -217,3 +217,19 @@ describe('rich messages', () => {
     expect(imAddressed(card, ImSessionSchema.parse({ sessionId: 'g1', sessionCategory: 'D', participants: [] }), self)).toBe('mention')
   })
 })
+
+describe('bot conversations', () => {
+  const bot = ImSessionSchema.parse({ sessionId: 'b1', sessionCategory: 'BOT', participants: [] })
+  const config = { chats: [], directMessages: true, otherChats: 'none' as const, selfName: '', aliases: '', pollSeconds: 45, readPageSize: 50 }
+  it('are read like a direct chat, so an instruction typed there reaches the agent', () => {
+    expect(imConversation(bot)).toBe(true)
+    expect(imWatched(bot, config)).toBe(true)
+    expect(imDirect(bot)).toBe(true)
+    const message = ImMessageSchema.parse({ messageId: 60, senderId: 9766, messageTime: 1795200000000, messageType: 'T', content: '@AI分身 查下日志' })
+    expect(imAddressed(message, bot, { id: 9766, fullId: 'E.fs.9766', names: ['斯作益seth', 'AI分身'] })).toBe('direct')
+  })
+  it('still ignores service channels', () => {
+    expect(imConversation(ImSessionSchema.parse({ sessionId: 'o1', sessionCategory: 'OSS1', participants: [] }))).toBe(false)
+    expect(imConversation(ImSessionSchema.parse({ sessionId: 'c1', sessionCategory: 'CRM', participants: [] }))).toBe(false)
+  })
+})

@@ -88,7 +88,10 @@ export const imOwn = (message: ImMessage, self: ImSelf): boolean => message.send
  * `BOT`, `TODO`, `CRM`, `SS` are system channels. A direct chat carries no mention, so every message in it is addressed.
  */
 export const DIRECT = 'S'
-export const imDirect = (session: ImSession): boolean => session.sessionCategory === DIRECT
+export const BOT_CHAT = 'BOT'
+/** A direct chat or a bot conversation carries no mention to rely on, so every message there is addressed to the agent. */
+export const imDirect = (session: ImSession): boolean =>
+  session.sessionCategory === DIRECT || session.sessionCategory === BOT_CHAT
 /**
  * Whether the message is addressed to the agent: a direct chat, a quote of the agent's own message, or a mention of its
  * name or identity. 企信 returns mentions as text in the content, and as an id list for some message types.
