@@ -276,7 +276,7 @@ export interface Attention { id: string; question: string; triggerId?: string }
 /** Ticket aggregate: an authorized work item with its assignments, channels, thread bindings, and inputs. */
 export interface Ticket {
   id: string
-  /** A small number people can quote ("T-42"), assigned once when the ticket is created; older tickets have none. */
+  /** A small number people can quote ("SU-42"), assigned once when the ticket is created; older tickets have none. */
   number?: number
   title: string
   decisionId: string

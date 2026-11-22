@@ -119,7 +119,7 @@ export function ticketSummary(ticket: Ticket) {
   const stage = ticketStage(ticket)
   const note = ticketNote(ticket, stage)
   const state = liveTicket(ticket) ? 'open' as const : 'ended' as const
-  return { id: ticket.id, key: ticket.number ? `T-${ticket.number}` : undefined, number: ticket.number,
+  return { id: ticket.id, key: ticket.number ? `SU-${ticket.number}` : undefined, number: ticket.number,
     title: ticket.title, state, ...stage, ...note ? { note } : {},
     actions: { retry: canRetry(ticket), stop: liveTicket(ticket) }, strength: ticket.mandate.strength, ended: ticket.ended,
     attention: ticket.attention && { ...ticket.attention, question: markdown(ticket.attention.question) },
