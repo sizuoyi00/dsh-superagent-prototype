@@ -10,6 +10,14 @@
 | `qa-verify` | 测试 | 可写测试代码，不改业务实现 |
 | `release` | 发布 | 只做发布与发布后验证 |
 
+## 工具与凭证
+
+## 工具与凭证
+
+- TAPD 一律用 `tapd-cli`（读写同一套）。先用 `set -a; source /home/sizuoyi/.config/bug-finder/secrets.env; set +a` 加载 `TAPD_TOKEN`、`TAPD_API_ENDPOINT`，再执行命令；写操作按 `tapd-safe-write` 技能的前置校验与回读要求做。
+- 本部署**没有 TAPD MCP**，不要找 `mcp__` 工具。
+- 企信、K8s、Kdocs、Grafana 分别用 `sharecrm`、`fs-k8s-cli`、`kdocs-cli`、`loom-grafana`。
+
 ## 通用约定（四份技能都遵守）
 
 - 你只能**写报告**：结论、证据、下一步都写进报告；**不要给任何人发企信/TAPD 消息**，对外说话由 root 负责。
