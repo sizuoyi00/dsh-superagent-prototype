@@ -115,7 +115,8 @@ export const imKind: SourceKind<ImConfig> = {
     async send(host, message: OutboundMessage) {
       const { sessionId, messageId } = message.channel.address
       if (!sessionId) throw new Error('Missing 企信 reply target')
-      const args = ['im', 'message', 'send-txt', '--sessionId', sessionId, '--text', checkedImText(message.text), '--markdownFormat', 'true']
+      // Plain text: the rich-text card wraps the message in a bordered card people find odd to read.
+      const args = ['im', 'message', 'send-txt', '--sessionId', sessionId, '--text', checkedImText(message.text)]
       if (messageId) args.push('--replyMessageId', messageId)
       try { await host.commands.run(CLI, args) }
       catch (error) {
