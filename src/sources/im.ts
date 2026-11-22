@@ -25,6 +25,7 @@ const ConfigSchema = z.object({
   aliases: z.string().trim().max(300).default(''),
   otherChats: z.enum(['none', 'mentions']).default('none'),
   pollSeconds: z.number().int().min(10).max(3600).default(45),
+  quietSeconds: z.number().int().min(0).max(600).default(30),
   readPageSize: z.number().int().min(1).max(200).default(50),
 }).strict()
 export type ImConfig = z.infer<typeof ConfigSchema>
@@ -95,6 +96,8 @@ export const imKind: SourceKind<ImConfig> = {
       hint: { zh: '没有列在上面的会话（含以后新建的）。“仅 @”接收那里 @ 智能体或引用其消息的消息；谁能发起工作仍由策略里的准入决定。',
         en: 'Sessions not listed above, including ones created later. "@ only" receives messages there that mention the agent or quote it; whose messages may originate work is still the Policy\'s admission.' } },
     { key: 'pollSeconds', type: 'number', advanced: true, min: 10, max: 3600, label: { zh: '轮询间隔 / 秒', en: 'Polling interval / seconds' } },
+    { key: 'quietSeconds', type: 'number', advanced: true, min: 0, max: 600, label: { zh: '静默窗口 / 秒', en: 'Quiet window / seconds' },
+      hint: { zh: '消息发出后先等这么久才处理，让人把话说完；窗口内的多条消息一起处理。', en: 'A message is handled only after this long, so a person can finish the thought; messages inside the window are handled together.' } },
     { key: 'readPageSize', type: 'number', advanced: true, min: 1, max: 200, label: { zh: '每页消息数', en: 'Messages per page' },
       hint: { zh: '智能体读取上下文与每轮拉取时每页的消息数。', en: 'Messages per page when agents read context and when a round fetches messages.' } },
   ],
@@ -231,6 +234,8 @@ async function pollSession(ctx: SourceContext, config: ImConfig, self: ImSelf, s
     ctx.state.set(cursorKey, session.lastMessageTime ?? Date.now())
     return
   }
+  // Messages younger than the quiet window wait for the next round, so a burst is answered once and in order.
+  const settled = Date.now() - config.quietSeconds * 1000
   const pages: ImMessage[][] = []
   let reached = false
   let from: number | undefined
@@ -244,7 +249,8 @@ async function pollSession(ctx: SourceContext, config: ImConfig, self: ImSelf, s
   }
   // A burst longer than one round of pages is caught up from its oldest page, so no message is skipped and the order holds.
   const window = reached ? pages.flat() : pages.at(-1) ?? []
-  const ordered = window.filter(message => message.messageTime > since).sort((left, right) => left.messageTime - right.messageTime)
+  const ordered = window.filter(message => message.messageTime > since && message.messageTime <= settled)
+    .sort((left, right) => left.messageTime - right.messageTime)
   for (const message of ordered) {
     if (imOwn(message, self)) {
       // The agent's own messages carry the display name people mention; learning it makes "@ me" work.
