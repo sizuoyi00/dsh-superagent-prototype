@@ -93,6 +93,15 @@ export function mandateInstructions(mandate: Pick<Mandate, 'strength'>): string 
     + 'internal to one module within the accepted rule scope. If it requires public-interface or behavior changes, new interaction, product '
     + 'decisions or clarification, stop and report dropped; do not expand scope.' : ''
 }
+/** The workspace folder a role's tickets live in, from the title prefix the orchestrator adds (`[排查] …`). */
+const ROLE_FOLDERS: Record<string, string> = { 开发: 'dev', 排查: 'troubleshoot', 测试: 'qa', 发布: 'release',
+  dev: 'dev', troubleshoot: 'troubleshoot', qa: 'qa', release: 'release' }
+export function roleFolder(title: string): string | undefined {
+  const match = /^\s*\[([^\]]{1,20})\]/.exec(title)
+  if (!match) return undefined
+  const name = match[1]!.trim()
+  return ROLE_FOLDERS[name.toLowerCase()] ?? ROLE_FOLDERS[name]
+}
 /** Builds a newly accepted ticket's Execution metadata: its worktree name, workspace directory, and assignment text. */
 export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>, settings: Settings,
   stateDir: string): Execution {
@@ -107,7 +116,9 @@ export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutco
   const assignment = ticket.mandate.strength === 'inferred' && ruleIds
     ? `Proactively accepted under ${ruleIds.join(', ')}. Scope: ${outcome.scope}.${precedence}${note}`
     : note.trim()
-  return { name, directory: join(executionRoot(settings, stateDir), name), assignment }
+  // A role prefix in the title groups the ticket's workspace, so the execution root stays readable.
+  const folder = roleFolder(ticket.title)
+  return { name, directory: join(executionRoot(settings, stateDir), ...folder ? [folder] : [], name), assignment }
 }
 /** Character limits for inline assignment and trigger text in worker messages; longer text is read via its resource. */
 const ASSIGNMENT_CHARS = 1500, TRIGGER_CHARS = 600
