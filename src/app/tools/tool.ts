@@ -13,7 +13,8 @@ export type RegisterTool = <S extends z.ZodType>(name: string, description: stri
 export const tool = <S extends z.ZodType>(definition: Tool<S>): Tool => definition as unknown as Tool
 
 /** Human-facing acknowledgement text, constrained to `IM_WORDS` regardless of which channel it is posted to. */
-export const AcknowledgementSchema = z.string().trim().min(1)
+// An empty acknowledgement is allowed and means silence: the request is answered at once, so no receipt is posted.
+export const AcknowledgementSchema = z.string().trim()
   .refine(text => wordCount(text) <= IM_WORDS, `An acknowledgement has at most ${IM_WORDS} words (Chinese uses word segmentation); write one short sentence.`)
 /**
  * Builds the `orchestrator_read` tool, scoping allowed resource patterns to the main Session or to an

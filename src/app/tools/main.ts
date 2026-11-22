@@ -62,7 +62,8 @@ const FIELDS: Record<Field, { check: z.ZodType; reads: readonly Kind[]; needs: r
   ticket_id: { check: z.string(), reads: ['attach', 'stop'], needs: ['attach', 'stop'] },
   title: { check: z.string().max(200), reads: ['accept'], needs: ['accept'] },
   worktree_name: { check: WorktreeNameSchema, reads: ['accept'], needs: ['accept'] },
-  acknowledgement: { check: AcknowledgementSchema, reads: ['accept'], needs: ['accept'] },
+  // An acceptance may be silent (empty text), for a request answered in one step where a receipt would only be noise.
+  acknowledgement: { check: AcknowledgementSchema, reads: ['accept'], needs: [] },
   note: { check: RoutingNoteSchema, reads: ['accept', 'attach'], needs: [] },
   reason: { check: z.string().max(500), reads: ['ignore', 'stop'], needs: ['ignore'] },
 }
@@ -95,7 +96,7 @@ function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<string
     case 'accept': {
       const before = host.store.triggers.disposition(item.trigger_id)?.decisionId
       const decision = host.engine.decide(item.trigger_id, { kind: 'accept', title: item.title!, scope: item.title!, reason: { code: 'explicitRouted' },
-        acknowledgement: item.acknowledgement!, name: item.worktree_name!, ...note })
+        acknowledgement: item.acknowledgement || undefined, name: item.worktree_name!, ...note })
       // A Decision that created no ticket is the item's refusal; one that existed before keeps what it was accepted with.
       if (decision.kind !== 'accept' || !decision.ticketId) return { refused: `Ticket was not created: ${reasonText(decision.reason)}` }
       if (decision.id === before) {
