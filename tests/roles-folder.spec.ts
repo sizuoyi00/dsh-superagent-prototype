@@ -21,3 +21,11 @@ describe('the workspace folder of a role', () => {
     expect(directory('x')).toBe('/srv/work/ai-engine-log-8fe137c9def'.replace('8fe137c9def', '8fe137c9cdef'))
   })
 })
+
+/** A worker's DSH workspace is named after its ticket, so the sidebar reads as work rather than as directory ids. */
+import { readFileSync } from 'node:fs'
+import { expect as expectSource, it as itSource } from 'vitest'
+itSource('passes the ticket title as the workspace title, and only for a worker', () => {
+  const source = readFileSync(new URL('../src/app/sessions.ts', import.meta.url), 'utf8')
+  expectSource(source).toContain("create(cwd, role === 'worker' ? title : undefined)")
+})
