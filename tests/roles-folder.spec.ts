@@ -53,3 +53,12 @@ itExec('puts the checkout under the role workspace for a role ticket', () => {
   const plain = executionOf({ ...(ticket as object), title: '查日志' } as never, outcome, settings, '/state')
   expectExec(plain.directory).toBe(plain.worktree)
 })
+
+/** A shared role directory that already exists must not count as a prepared ticket: the checkout is what prepare makes. */
+import { readFileSync as readDsh } from 'node:fs'
+import { expect as expectPrep, it as itPrep } from 'vitest'
+itPrep('decides preparation by the ticket checkout, not the shared role directory', () => {
+  const source = readDsh(new URL('../src/executor/dsh.ts', import.meta.url), 'utf8')
+  expectPrep(source).toContain('ticket.execution.worktree !== workspace ? ticket.execution.worktree : workspace')
+  expectPrep(source).toContain('if (!await stat(prepared)')
+})

@@ -451,9 +451,12 @@ export class DshExecutor implements Executor {
     }
     const source = sourceTrigger(this.host, ticket)
     const workspace = ticket.execution?.directory ?? ''
+    // A role ticket's Session sits in a shared role directory that usually exists already; what the prepare command must
+    // produce is the ticket's own checkout, so its absence is what decides.
+    const prepared = ticket.execution?.worktree && ticket.execution.worktree !== workspace ? ticket.execution.worktree : workspace
     if (!current()) return
-    // Prepare the workspace directory once; an existing directory counts as already prepared, including worktrees created before `prepare` commands existed.
-    if (!await stat(workspace).then(() => true, () => false)) {
+    // Prepare once; an existing path counts as already prepared, including worktrees created before `prepare` commands existed.
+    if (!await stat(prepared).then(() => true, () => false)) {
       await this.prepareDirectory(ticket)
       if (!current()) return
     }
