@@ -22,6 +22,7 @@ const ConfigSchema = z.object({
     listen: z.enum(['mentions', 'all']).default('mentions') }).strict()).default([]),
   directMessages: z.boolean().default(false),
   selfName: z.string().trim().max(100).default(''),
+  aliases: z.string().trim().max(300).default(''),
   otherChats: z.enum(['none', 'mentions']).default('none'),
   pollSeconds: z.number().int().min(10).max(3600).default(45),
   readPageSize: z.number().int().min(1).max(200).default(50),
@@ -29,11 +30,13 @@ const ConfigSchema = z.object({
 export type ImConfig = z.infer<typeof ConfigSchema>
 /** Reads the agent's own 企信 identity, so its own messages are dropped and mentions of it are recognized. */
 const SelfSchema = z.looseObject({ userId: z.union([z.string(), z.number()]), userName: z.string().nullish() })
-export async function readSelf(commands: SourceContext['commands'], configured?: string): Promise<ImSelf> {
+export async function readSelf(commands: SourceContext['commands'], configured?: string, aliases?: string): Promise<ImSelf> {
   const self = SelfSchema.parse(JSON.parse(await commands.run(CLI, ['auth', 'status'])))
   const id = Number(self.userId)
-  // A person's full sender id is `E.fs.<id>`; the names are what a mention in a message's text looks like.
-  return { id, fullId: `E.fs.${id}`, names: [...new Set([configured?.trim(), self.userName, String(id)].filter((name): name is string => !!name))] }
+  // A person's full sender id is `E.fs.<id>`; the names are what a mention in a message's text may look like.
+  const extra = (aliases ?? '').split(/[,，、;；\s]+/).map(name => name.trim()).filter(Boolean)
+  return { id, fullId: `E.fs.${id}`,
+    names: [...new Set([configured?.trim(), ...extra, self.userName, String(id)].filter((name): name is string => !!name))] }
 }
 const SessionsSchema = z.looseObject({ sessions: z.array(z.unknown()).default([]) })
 /** The user's recently changed sessions; the Source polls only those it is configured for. */
@@ -79,6 +82,9 @@ export const imKind: SourceKind<ImConfig> = {
     { key: 'selfName', type: 'text', advanced: true, label: { zh: '我在企信里的显示名', en: 'My display name in 企信' },
       hint: { zh: '群里的 @ 只有文字，没有结构化的用户 ID，所以按这个名字识别“@我”。留空时会从自己发出的消息里学习。',
         en: 'A mention in a group is text only, without a structured user ID, so this name is what "@ me" matches. Left empty, the Source learns it from messages it sent.' } },
+    { key: 'aliases', type: 'text', advanced: true, label: { zh: '其他昵称', en: 'Other names' },
+      hint: { zh: '群里 @ 时可能用的其他称呼，用逗号分隔。企信的 @ 只有文字，所以每个可能出现的名字都要列出来，例如“AI分身”。',
+        en: 'Other names people may use when mentioning the agent, comma separated. A 企信 mention is text only, so every name that may appear belongs here, such as "AI分身".' } },
     { key: 'otherChats', type: 'select', label: { zh: '其他会话', en: 'Other sessions' }, options: [
       { value: 'none', label: { zh: '不接收', en: 'Not received' } }, { value: 'mentions', label: { zh: '仅 @', en: '@ only' } }],
       hint: { zh: '没有列在上面的会话（含以后新建的）。“仅 @”接收那里 @ 智能体或引用其消息的消息；谁能发起工作仍由策略里的准入决定。',
@@ -180,6 +186,7 @@ export function apply(ctx: Context): void {
 export async function runIm(ctx: SourceContext, signal: AbortSignal): Promise<void> {
   await ctx.ready
   let self: ImSelf | undefined
+  let namesSignature = ''
   while (!signal.aborted) {
     const config = ctx.config<ImConfig>(SOURCE)
     const report = (state: 'starting' | 'ready' | 'error', detail: string) => ctx.report('im', { state, detail })
@@ -189,7 +196,11 @@ export async function runIm(ctx: SourceContext, signal: AbortSignal): Promise<vo
       continue
     }
     try {
-      self ??= await readSelf(ctx.commands, config.selfName)
+      const signature = `${config.selfName}|${config.aliases}`
+      if (!self || signature !== namesSignature) {
+        self = await readSelf(ctx.commands, config.selfName, config.aliases)
+        namesSignature = signature
+      }
       const sessions = (await recentSessions(ctx.commands)).filter(session => imWatched(session, config))
       const failures: string[] = []
       for (const session of sessions) {

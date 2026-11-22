@@ -108,7 +108,7 @@ describe('the loop', () => {
 })
 
 describe('which sessions are received', () => {
-  const base = { chats: [], directMessages: false, otherChats: 'none' as const, selfName: '', pollSeconds: 30, readPageSize: 50 }
+  const base = { chats: [], directMessages: false, otherChats: 'none' as const, selfName: '', aliases: '', pollSeconds: 30, readPageSize: 50 }
   const group = ImSessionSchema.parse({ sessionId: 'g1', sessionCategory: 'D', participants: [] })
   const one = ImSessionSchema.parse({ sessionId: 'd1', sessionCategory: 'S', participants: [] })
   it('receives nothing until a session, direct chats or other sessions are switched on', async () => {
@@ -128,7 +128,7 @@ describe('which sessions are received', () => {
 describe('system channels', () => {
   it('never reads a system channel, even with other sessions on', () => {
     const oss = ImSessionSchema.parse({ sessionId: 'OSS1.publish.1', sessionCategory: 'OSS1', participants: [] })
-    const config = { chats: [], directMessages: true, otherChats: 'mentions' as const, selfName: '', pollSeconds: 30, readPageSize: 50 }
+    const config = { chats: [], directMessages: true, otherChats: 'mentions' as const, selfName: '', aliases: '', pollSeconds: 30, readPageSize: 50 }
     expect(imConversation(oss)).toBe(false)
     expect(imWatched(oss, config)).toBe(false)
   })
@@ -141,7 +141,7 @@ describe('a burst longer than one round of pages', () => {
     const burst = Array.from({ length: 12 }, (_value, index) => ({ messageId: 100 + index, senderId: 42,
       messageTime: 1100 + index * 100, messageType: 'T', content: `m${index}` }))
     const ctx = loopContext({}, { chats: [{ sessionId: 's1', listen: 'mentions' as const }], directMessages: false,
-      otherChats: 'none' as const, selfName: '', pollSeconds: 10, readPageSize: 1 }, new Map([['im-cursor:s1', 1000]]))
+      otherChats: 'none' as const, selfName: '', aliases: '', pollSeconds: 10, readPageSize: 1 }, new Map([['im-cursor:s1', 1000]]))
     // A page holds the message just older than its cursor, as 企信 returns them newest first.
     ctx.value.commands.run = vi.fn(async (_program: string, args: string[]) => {
       if (args[0] === 'auth') return JSON.stringify({ userId: 9766, userName: '斯作益seth' })
@@ -183,5 +183,17 @@ describe('mentions inside rich messages', () => {
       content: '{"title":"@斯作益seth 请看这个构建失败"}' })
     expect(imText(card)).toBe('[图文]')
     expect(imAddressed(card, ImSessionSchema.parse({ sessionId: 's1', sessionCategory: 'D', participants: [] }), self)).toBe('mention')
+  })
+})
+
+describe('mention names', () => {
+  it('matches a configured alias as well as the account name', () => {
+    const group = ImSessionSchema.parse({ sessionId: 'g1', sessionCategory: 'D', participants: [] })
+    const aliasSelf = { id: 9766, fullId: 'E.fs.9766', names: ['斯作益seth', 'AI分身'] }
+    const message = (content: string) => ImMessageSchema.parse({ messageId: 40, senderId: 42, senderTime: 0, messageTime: 1795200000000,
+      messageType: 'T', content })
+    expect(imAddressed(message('@AI分身 帮我巡检一下这个群'), group, aliasSelf)).toBe('mention')
+    expect(imAddressed(message('@斯作益seth 看下'), group, aliasSelf)).toBe('mention')
+    expect(imAddressed(message('@AI分身'), group, { ...aliasSelf, names: ['斯作益seth'] })).toBeUndefined()
   })
 })
