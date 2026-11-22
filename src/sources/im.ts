@@ -6,7 +6,7 @@ import { CliError, validItems } from '../infra/commands.ts'
 import { checkedImText } from '../infra/text.ts'
 import { KV } from '../kv.ts'
 import { sourceContext, type SourceContext } from './host.ts'
-import { imQuote, imText, imTrigger, imThreadId, ImMessageSchema, ImSessionSchema, SOURCE, type ImMessage, type ImSelf } from './im-trigger.ts'
+import { DIRECT, imQuote, imText, imTrigger, imThreadId, ImMessageSchema, ImSessionSchema, SOURCE, type ImMessage, type ImSelf } from './im-trigger.ts'
 import type { ContextMessage, SourceKind } from './kind.ts'
 import { pause } from './poll.ts'
 
@@ -50,12 +50,12 @@ export async function listMessages(commands: SourceContext['commands'], sessionI
   return validItems(ImMessageSchema, page.messages)
 }
 /** Whether the Source receives this session: a configured chat, or any direct chat when direct messages are on. */
-/** Only a group or a direct chat is a conversation people address the agent in; system channels are never read. */
+/** Only a group (`D`) or a direct chat (`S`) is a conversation people address the agent in; system channels are never read. */
 export const imConversation = (session: z.infer<typeof ImSessionSchema>): boolean =>
-  session.sessionCategory === 'T' || session.sessionCategory === 'D'
+  session.sessionCategory === 'D' || session.sessionCategory === DIRECT
 export const imWatched = (session: z.infer<typeof ImSessionSchema>, config: ImConfig): boolean => imConversation(session)
   && (config.chats.some(chat => chat.sessionId === session.sessionId)
-    || (session.sessionCategory === 'D' ? config.directMessages : config.otherChats === 'mentions'))
+    || (session.sessionCategory === DIRECT ? config.directMessages : config.otherChats === 'mentions'))
 /** The rule the configured chats give this session, when it is one of them. */
 const chatRule = (sessionId: string, config: ImConfig) => config.chats.find(chat => chat.sessionId === sessionId)
 

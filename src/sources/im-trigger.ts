@@ -53,8 +53,12 @@ export const imQuote = (message: ImMessage): z.infer<typeof ImQuoteSchema> | und
   message.replyMessageVo ?? message.replyMessage ?? message.quoteMessageVo ?? undefined
 /** True when the message was sent by the Source's own identity, which it never receives. */
 export const imOwn = (message: ImMessage, self: ImSelf): boolean => message.senderId === self.id
-/** A direct chat carries no mention, so every message in it is addressed to the agent. */
-export const imDirect = (session: ImSession): boolean => session.sessionCategory === 'D'
+/**
+ * 企信 session kinds: `D` is a group, `S` a direct chat, `C` a parent of a cross-enterprise conversation, and `OSS1`,
+ * `BOT`, `TODO`, `CRM`, `SS` are system channels. A direct chat carries no mention, so every message in it is addressed.
+ */
+export const DIRECT = 'S'
+export const imDirect = (session: ImSession): boolean => session.sessionCategory === DIRECT
 /**
  * Whether the message is addressed to the agent: a direct chat, a quote of the agent's own message, or a mention of its
  * name or identity. 企信 returns mentions as text in the content, and as an id list for some message types.
@@ -66,8 +70,9 @@ export function imAddressed(message: ImMessage, session: ImSession, self: ImSelf
   if (quote && sameSender(quote.fullSenderId, self)) return 'direct'
   const ids = message.atFullUserIdList ?? []
   if (ids.some(id => id.includes(String(self.id)))) return 'mention'
-  // A mention is text only: `@` followed by the display name, which the Source learns from its own messages.
-  const text = imText(message)
+  // A mention is text only: `@` followed by the display name. Rich-text and card messages keep their mention in the raw
+  // content, so matching runs on that rather than on the placeholder the model sees.
+  const text = message.content ?? ''
   if (self.names.some(name => name && text.includes(`@${name}`))) return 'mention'
   return undefined
 }

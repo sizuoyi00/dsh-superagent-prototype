@@ -2,11 +2,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Trigger } from '../src/core/index.ts'
 import { imConversation, imKind, imWatched, runIm } from '../src/sources/im.ts'
-import { imAddressed, imOwn, imThreadId, imTrigger, imTriggerId, imText, ImMessageSchema, ImSessionSchema } from '../src/sources/im-trigger.ts'
+import { imAddressed, imDirect, imOwn, imThreadId, imTrigger, imTriggerId, imText, ImMessageSchema, ImSessionSchema } from '../src/sources/im-trigger.ts'
 
 const self = { id: 9766, fullId: 'E.fs.9766', names: ['斯作益seth'] }
 const session = ImSessionSchema.parse({ sessionId: 's1', sessionName: '团队群', sessionCategory: 'T', participants: [] })
-const direct = ImSessionSchema.parse({ sessionId: 's2', sessionCategory: 'D', participants: [] })
+const direct = ImSessionSchema.parse({ sessionId: 's2', sessionCategory: 'S', participants: [] })
 const message = (fields: Record<string, unknown> = {}) => ImMessageSchema.parse({ messageId: 10, senderId: 42, senderName: '张三',
   messageTime: 1795200000000, messageType: 'T', content: '帮我看下这个报错', ...fields })
 
@@ -16,7 +16,7 @@ function loopContext(pages: Record<string, unknown[]>, config: Record<string, un
   const report = vi.fn()
   const commands = { run: vi.fn(async (_program: string, args: string[]) => {
     if (args[0] === 'auth') return JSON.stringify({ userId: 9766, userName: '斯作益seth' })
-    if (args[0] === 'im' && args[1] === 'session') return JSON.stringify({ sessions: [{ sessionId: 's1', sessionName: '团队群', sessionCategory: 'T', participants: [], lastMessageTime: 1000 }] })
+    if (args[0] === 'im' && args[1] === 'session') return JSON.stringify({ sessions: [{ sessionId: 's1', sessionName: '团队群', sessionCategory: 'D', participants: [], lastMessageTime: 1000 }] })
     return JSON.stringify({ messages: pages[args[4]!] ?? [] })
   }) }
   const value = { ready: Promise.resolve(), config: () => config, report, commands,
@@ -109,8 +109,8 @@ describe('the loop', () => {
 
 describe('which sessions are received', () => {
   const base = { chats: [], directMessages: false, otherChats: 'none' as const, selfName: '', pollSeconds: 30, readPageSize: 50 }
-  const group = ImSessionSchema.parse({ sessionId: 'g1', sessionCategory: 'T', participants: [] })
-  const one = ImSessionSchema.parse({ sessionId: 'd1', sessionCategory: 'D', participants: [] })
+  const group = ImSessionSchema.parse({ sessionId: 'g1', sessionCategory: 'D', participants: [] })
+  const one = ImSessionSchema.parse({ sessionId: 'd1', sessionCategory: 'S', participants: [] })
   it('receives nothing until a session, direct chats or other sessions are switched on', async () => {
     expect(imWatched(group, base)).toBe(false)
     expect(imWatched(one, base)).toBe(false)
@@ -145,7 +145,7 @@ describe('a burst longer than one round of pages', () => {
     // A page holds the message just older than its cursor, as 企信 returns them newest first.
     ctx.value.commands.run = vi.fn(async (_program: string, args: string[]) => {
       if (args[0] === 'auth') return JSON.stringify({ userId: 9766, userName: '斯作益seth' })
-      if (args[0] === 'im' && args[1] === 'session') return JSON.stringify({ sessions: [{ sessionId: 's1', sessionCategory: 'T', participants: [], lastMessageTime: 1000 }] })
+      if (args[0] === 'im' && args[1] === 'session') return JSON.stringify({ sessions: [{ sessionId: 's1', sessionCategory: 'D', participants: [], lastMessageTime: 1000 }] })
       const from = args.includes('--fromMessageId') ? args[args.indexOf('--fromMessageId') + 1]! : ''
       if (!from) return JSON.stringify({ messages: [burst.at(-1)] })
       const index = burst.findIndex(message => String(message.messageId) === from)
@@ -162,5 +162,26 @@ describe('a burst longer than one round of pages', () => {
     expect(ctx.receive.mock.calls.map(call => call[0].text)).toEqual(['m2', 'm3', 'm4', 'm5', 'm6', 'm7', 'm8', 'm9', 'm10', 'm11'])
     controller.abort(); await running
     vi.useRealTimers()
+  })
+})
+
+describe('session kinds', () => {
+  it('receives groups and direct chats only, and treats only a direct chat as addressed on its own', () => {
+    const group = ImSessionSchema.parse({ sessionId: 'g', sessionCategory: 'D', participants: [] })
+    const direct = ImSessionSchema.parse({ sessionId: 's', sessionCategory: 'S', participants: [] })
+    expect(imConversation(group)).toBe(true)
+    expect(imConversation(direct)).toBe(true)
+    expect(imConversation(ImSessionSchema.parse({ sessionId: 'c', sessionCategory: 'C', participants: [] }))).toBe(false)
+    expect(imDirect(direct)).toBe(true)
+    expect(imDirect(group)).toBe(false)
+  })
+})
+
+describe('mentions inside rich messages', () => {
+  it('recognizes a mention in a card or rich-text message, whose visible text is a placeholder', () => {
+    const card = ImMessageSchema.parse({ messageId: 30, senderId: 42, messageTime: 1795200000000, messageType: 'MIX',
+      content: '{"title":"@斯作益seth 请看这个构建失败"}' })
+    expect(imText(card)).toBe('[图文]')
+    expect(imAddressed(card, ImSessionSchema.parse({ sessionId: 's1', sessionCategory: 'D', participants: [] }), self)).toBe('mention')
   })
 })
