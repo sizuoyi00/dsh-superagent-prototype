@@ -204,6 +204,12 @@ export class WorkerSlots {
  * `agent/inbox/claimed`, `session/event` and `agent/error` events on the Cordis context, and reports status transitions back to Engine.
  * Runtime, Engine, worker tools, and management routes use this class to prepare, launch, deliver to, stop, and resume ticket assignments.
  */
+/** A failure's own message plus what it wrapped, so an AggregateError does not hide the reason it is reported for. */
+export function described(error: unknown): string {
+  if (!(error instanceof AggregateError)) return String(error)
+  return [String(error), ...[...error.errors].map(inner => `cause: ${String(inner)}`)].join('; ')
+}
+
 export class DshExecutor implements Executor {
   private readonly disposers: (() => void)[] = []
   private readonly slots: WorkerSlots
@@ -539,7 +545,7 @@ export class DshExecutor implements Executor {
   private background(work: Promise<void>): Promise<void> {
     const { health } = this.host
     return work.then(() => { if (health.get()?.state === 'error') health.set({ state: 'ready', detail: 'Worker events are handled', at: now() }) },
-      (error: unknown) => { health.set({ state: 'error', detail: String(error), at: now() }) })
+      (error: unknown) => { health.set({ state: 'error', detail: described(error), at: now() }) })
   }
   /**
    * Checks whether `error` is a transient failure with retry attempts remaining under `key`, mutating `this.transient`:
