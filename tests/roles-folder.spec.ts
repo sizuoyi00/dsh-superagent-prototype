@@ -27,5 +27,14 @@ import { readFileSync } from 'node:fs'
 import { expect as expectSource, it as itSource } from 'vitest'
 itSource('passes the ticket title as the workspace title, and only for a worker', () => {
   const source = readFileSync(new URL('../src/app/sessions.ts', import.meta.url), 'utf8')
-  expectSource(source).toContain("create(cwd, role === 'worker' ? title : undefined)")
+  expectSource(source).toContain("create(cwd, role === 'worker' ? workspaceTitle(cwd, title) : undefined)")
+})
+
+/** A worker workspace is titled by role and short name, so the sidebar groups by role and reads apart from the session. */
+import { expect as expectTitle, it as itTitle } from 'vitest'
+import { workspaceTitle } from '../src/app/sessions.ts'
+itTitle('titles a worker workspace with its role and the directory without the ticket id', () => {
+  expectTitle(workspaceTitle('/srv/work/troubleshoot/ai-task-log-week-1c70ca7f5677', '[排查] 查 AI Task 近一周错误')).toBe('排查 · ai-task-log-week')
+  expectTitle(workspaceTitle('/srv/work/ai-provider-log-week-cb9e2f6b5f95', '查 Provider 周报')).toBe('ai-provider-log-week')
+  expectTitle(workspaceTitle('/srv/work/dev/login-fix-abcdefabcdef', '[开发] 修登录')).toBe('开发 · login-fix')
 })

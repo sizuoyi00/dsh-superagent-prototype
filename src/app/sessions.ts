@@ -4,7 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { MessageId } from '@deepseek-ai/dsh-llm'
 import { scopeParentOf } from '@deepseek-ai/dsh-scope'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { dirname } from 'node:path'
+import { basename, dirname } from 'node:path'
 import { z } from 'zod'
 import { key, liveTicket, type Ticket } from '../core/index.ts'
 import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
@@ -42,6 +42,17 @@ export interface SessionsHost {
  * What Sessions registered for an agent it decorated: the releases of its prompt section, tools and skill scope, the scope
  * its skills are registered in, and the skills of one prompt revision; for a worker's subagent, only its tool limits.
  */
+/** The label a person reads in the sidebar for a role prefix such as `[排查]`. */
+const ROLE_LABELS: Record<string, string> = { 开发: '开发', 排查: '排查', 测试: '测试', 发布: '发布',
+  dev: '开发', troubleshoot: '排查', qa: '测试', release: '发布' }
+/** A worker workspace's title: the role named by the ticket title, then its directory without the ticket id suffix. */
+export function workspaceTitle(cwd: string, title: string): string {
+  const prefix = /^\s*\[([^\]]{1,20})\]/.exec(title)?.[1]?.trim()
+  const role = prefix ? ROLE_LABELS[prefix.toLowerCase()] ?? ROLE_LABELS[prefix] : undefined
+  const short = basename(cwd).replace(/-[0-9a-f]{12}$/, '')
+  return role ? `${role} · ${short}` : short
+}
+
 interface SessionBinding { disposers: (() => void)[]; scope?: Context; skills?: { revision: number; dispose: () => void }; subagent?: true }
 
 /** The agent presets Executor Sessions and the main Session are created with, which the bundle's patch defines. */
@@ -139,8 +150,8 @@ export class Sessions {
     const ctx = this.ctx
     let result = await ctx.sessionController.resolveAgent(id as SessionId)
     if ('error' in result && result.error.code === 'session/not-found') {
-      // A worker's workspace carries the ticket title, so the DSH sidebar reads as work rather than as directory ids.
-      const workspace = await ctx.workspaceRegistry.create(cwd, role === 'worker' ? title : undefined)
+      // A worker's workspace takes its role and short name, so the sidebar groups by role without repeating the session title.
+      const workspace = await ctx.workspaceRegistry.create(cwd, role === 'worker' ? workspaceTitle(cwd, title) : undefined)
       // A Session keeps the preset it was created with, one of the bundle's own (cordis.patch.yml).
       await ctx.sessionController.create({ sessionId: id as SessionId, workspaceId: workspace.id,
         agentPreset: role === 'worker' ? WORKER_PRESET : ROUTER_PRESET })
