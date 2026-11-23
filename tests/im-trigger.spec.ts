@@ -43,6 +43,13 @@ describe('what a message is addressed to', () => {
     expect(imAddressed(message(), session, self)).toBeUndefined()
     expect(imAddressed(message({ replyMessageVo: { messageId: 5, fullSenderId: 'E.fs.7' } }), session, self)).toBeUndefined()
   })
+  it('does not treat the account\'s own words as a request unless they name the agent', () => {
+    const own = message({ senderId: self.id })
+    expect(imAddressed(own, direct, self)).toBeUndefined()
+    expect(imAddressed(own, session, self)).toBeUndefined()
+    expect(imAddressed(message({ senderId: self.id, content: '@斯作益seth 看一下' }), direct, self)).toBe('mention')
+    expect(imAddressed(message({ senderId: self.id, replyMessageVo: { messageId: 5, fullSenderId: 'E.fs.9766' } }), direct, self)).toBe('direct')
+  })
 })
 
 describe('threads and ids', () => {
@@ -102,8 +109,25 @@ describe('the loop', () => {
     const controller = new AbortController()
     const running = runIm(ctx.value, controller.signal)
     await vi.advanceTimersByTimeAsync(20_000)
-    expect(ctx.receive.mock.calls.map(call => call[0].text)).toEqual(['一', '我自己说的一句', '@斯作益seth 三'])
+    // The person's own words to the group are not requests, what the agent already sent is skipped, and the first
+    // message is left to the person because they spoke after it.
+    expect(ctx.receive.mock.calls.map(call => call[0].text)).toEqual(['@斯作益seth 三'])
     expect(ctx.state.get('im-cursor:s1')).toBe(1300)
+    controller.abort(); await running
+    vi.useRealTimers()
+  })
+  it('leaves a message alone once the person has answered the session, and still takes one that came after their reply', async () => {
+    vi.useFakeTimers()
+    const ctx = loopContext({ s1: [
+      { messageId: 23, senderId: 42, messageTime: 1300, messageType: 'T', content: '这个你看下' },
+      { messageId: 22, senderId: 42, messageTime: 1200, messageType: 'T', content: '帮我合下代码' },
+      { messageId: 21, senderId: 9766, messageTime: 1250, messageType: 'T', content: '我来', senderName: '斯作益seth' },
+    ] }, config, new Map([['im-cursor:s1', 1050]]))
+    const controller = new AbortController()
+    const running = runIm(ctx.value, controller.signal)
+    await vi.advanceTimersByTimeAsync(20_000)
+    // The person answered the first message themselves; the second arrived after their reply.
+    expect(ctx.receive.mock.calls.map(call => call[0].text)).toEqual(['这个你看下'])
     controller.abort(); await running
     vi.useRealTimers()
   })

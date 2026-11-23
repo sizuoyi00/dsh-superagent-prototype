@@ -6,7 +6,7 @@ import { CliError, validItems } from '../infra/commands.ts'
 import { checkedImText } from '../infra/text.ts'
 import { KV } from '../kv.ts'
 import { sourceContext, type SourceContext } from './host.ts'
-import { DIRECT, imOwn, imQuote, imText, imTrigger, imThreadId, ImMessageSchema, ImSessionSchema, SOURCE, type ImMessage, type ImSelf } from './im-trigger.ts'
+import { DIRECT, imAddressed, imOwn, imQuote, imText, imTrigger, imThreadId, ImMessageSchema, ImSessionSchema, SOURCE, type ImMessage, type ImSelf } from './im-trigger.ts'
 import type { ContextMessage, SourceKind } from './kind.ts'
 import { pause } from './poll.ts'
 
@@ -84,7 +84,9 @@ export const imKind: SourceKind<ImConfig> = {
         { key: 'listen', type: 'select', label: { zh: '接收', en: 'Receive' }, options: [
           { value: 'mentions', label: { zh: '仅 @', en: '@ only' } }, { value: 'all', label: { zh: '全部消息', en: 'All' } }] },
       ] },
-    { key: 'directMessages', type: 'switch', label: { zh: '接收私聊', en: 'Direct messages' } },
+    { key: 'directMessages', type: 'switch', label: { zh: '接收私聊', en: 'Direct messages' },
+      hint: { zh: '接收同事之间的私聊。本账号自己发出的消息是对别人说话，不算请求，除非 @ 智能体或引用它的消息；别人发来的消息若本人已经在会话里回复过，也不再算新请求。',
+        en: 'Receive direct chats between people. The account\'s own words are meant for the people it is talking to, so only one that names the agent is a request; a message from someone else is no longer a new request once the person has answered it in that session.' } },
     { key: 'selfName', type: 'text', advanced: true, label: { zh: '我在企信里的显示名', en: 'My display name in 企信' },
       hint: { zh: '群里的 @ 只有文字，没有结构化的用户 ID，所以按这个名字识别“@我”。留空时会从自己发出的消息里学习。',
         en: 'A mention in a group is text only, without a structured user ID, so this name is what "@ me" matches. Left empty, the Source learns it from messages it sent.' } },
@@ -157,8 +159,8 @@ export const imKind: SourceKind<ImConfig> = {
         columns: [{ key: 'id', type: 'text', label: { zh: '用户 ID', en: 'User ID' }, pattern: '[0-9]{1,20}' },
           { key: 'name', type: 'text', label: { zh: '名字', en: 'Name' }, optional: true }] },
     ],
-    explicit: { zh: '名单内的人 @ 智能体或私聊它，总是明确的请求；引用智能体消息也算点名。',
-      en: 'Someone on the list who mentions the agent or messages it directly always makes an explicit request; quoting its message counts as addressed too.' },
+    explicit: { zh: '名单内的人 @ 智能体或私聊它，总是明确的请求；引用智能体消息也算点名。本账号自己发出的消息是对别人说话，只有 @ 智能体或引用它的消息才算请求；本人已经在会话里回复过的消息不再算新请求。',
+      en: 'Someone on the list who mentions the agent or messages it directly always makes an explicit request, and quoting its message counts as addressed. The account\'s own words are meant for the people it is talking to, so only one that names the agent is a request, and a message the person already answered in that session is no longer a new request.' },
     rows(stored) {
       const config = ConfigSchema.parse(stored)
       const mentions = { zh: '仅 @', en: '@ only' }
@@ -275,6 +277,10 @@ async function pollSession(ctx: SourceContext, config: ImConfig, self: ImSelf, s
   }
   // A burst longer than one round of pages is caught up from its oldest page, so no message is skipped and the order holds.
   const window = reached ? pages.flat() : pages.at(-1) ?? []
+  // What the person typed from their own client is their own reply in this session, not the agent speaking.
+  const ownTyped = (message: ImMessage) => message.senderId === self.id && !imOwn(message, self)
+  // Anything older than the person's latest reply was already handled by them, so the agent leaves it to them.
+  const handledAt = window.reduce((latest, message) => ownTyped(message) ? Math.max(latest, message.messageTime) : latest, Number.NEGATIVE_INFINITY)
   const ordered = window.filter(message => message.messageTime > since && message.messageTime <= settled)
     .sort((left, right) => left.messageTime - right.messageTime)
   for (const message of ordered) {
@@ -283,8 +289,15 @@ async function pollSession(ctx: SourceContext, config: ImConfig, self: ImSelf, s
       if (message.senderName && !self.names.includes(message.senderName)) self.names.push(message.senderName)
       continue
     }
-    // A message the account wrote itself is answered like anyone else's, and teaches the name a mention uses.
-    if (message.senderId === self.id && message.senderName && !self.names.includes(message.senderName)) self.names.push(message.senderName)
+    if (message.senderId === self.id) {
+      // The account wrote this to the people it is talking to, so only a request that names the agent counts, and it
+      // teaches the name a mention uses.
+      if (message.senderName && !self.names.includes(message.senderName)) self.names.push(message.senderName)
+      if (!imAddressed(message, session, self)) continue
+    } else if (message.messageTime < handledAt) {
+      // The person already answered this session while the message waited, so it is no longer a new request.
+      continue
+    }
     const trigger = imTrigger(session, message, self)
     ctx.threads.describe(`${SOURCE}:${imThreadId(session, message)}`, { label: session.sessionName ?? session.sessionId })
     await ctx.receive(trigger)

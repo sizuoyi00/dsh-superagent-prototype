@@ -84,20 +84,25 @@ export const imQuote = (message: ImMessage): z.infer<typeof ImQuoteSchema> | und
  */
 export const imOwn = (message: ImMessage, self: ImSelf): boolean => message.senderId === self.id && !!message.tagFromLabel
 /**
- * 企信 session kinds: `D` is a group, `S` a direct chat, `C` a parent of a cross-enterprise conversation, and `OSS1`,
- * `BOT`, `TODO`, `CRM`, `SS` are system channels. A direct chat carries no mention, so every message in it is addressed.
+ * 企信 session kinds: `D` is a group, `S` is a direct chat between people, `C` a parent of a cross-enterprise
+ * conversation, and `OSS1`, `BOT`, `TODO`, `CRM`, `SS` are system channels. A direct chat addresses the account the
+ * agent answers for; a bot conversation is held with the agent itself.
  */
 export const DIRECT = 'S'
 export const BOT_CHAT = 'BOT'
-/** A direct chat or a bot conversation carries no mention to rely on, so every message there is addressed to the agent. */
+/** A direct chat or a bot conversation is private, so the direct-messages switch decides whether it is read. */
 export const imDirect = (session: ImSession): boolean =>
   session.sessionCategory === DIRECT || session.sessionCategory === BOT_CHAT
+/** The agent's own bot conversation, where whatever a person types is meant for the agent. */
+export const imBotChat = (session: ImSession): boolean => session.sessionCategory === BOT_CHAT
 /**
- * Whether the message is addressed to the agent: a direct chat, a quote of the agent's own message, or a mention of its
- * name or identity. 企信 returns mentions as text in the content, and as an id list for some message types.
+ * Whether the message is addressed to the agent: a bot conversation, a quote of the agent's own message, or a mention of
+ * its name or identity. In a direct chat between people, a message from someone else asks the account the agent stands
+ * in for; the account's own words are meant for those people and count only when they name the agent. 企信 returns
+ * mentions as text in the content, and as an id list for some message types.
  */
 export function imAddressed(message: ImMessage, session: ImSession, self: ImSelf): 'mention' | 'direct' | undefined {
-  if (imDirect(session)) return 'direct'
+  if (imBotChat(session)) return 'direct'
   const quote = imQuote(message)
   // 企信 quotes carry the quoted sender's full id, which for a person is `E.fs.<senderId>`.
   if (quote && sameSender(quote.fullSenderId, self)) return 'direct'
@@ -107,6 +112,8 @@ export function imAddressed(message: ImMessage, session: ImSession, self: ImSelf
   // content, so matching runs on that rather than on the placeholder the model sees.
   const text = message.content ?? ''
   if (self.names.some(name => name && text.includes(`@${name}`))) return 'mention'
+  // The account's own words are it talking to others; only the addresses above make them a request to the agent.
+  if (message.senderId !== self.id && imDirect(session)) return 'direct'
   return undefined
 }
 /** Whether a full sender id names the agent: `E.fs.<id>` is the account's own id, and a bot may carry it too. */
