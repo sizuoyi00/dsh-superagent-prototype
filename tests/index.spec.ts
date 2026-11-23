@@ -6,6 +6,7 @@ import { apply } from '../src/index.ts'
 const runtimes = vi.hoisted(() => [] as { machine: Machine; restart: () => void }[])
 vi.mock('../src/app/runtime.ts', () => ({ Runtime: class {
   ready = Promise.resolve()
+  masterId = 'orchestrator-test'
   constructor(_ctx: unknown, readonly machine: Machine, readonly restart: () => void) { runtimes.push(this) }
   configured() { return true }
   async stop() {}
@@ -22,6 +23,7 @@ function context() {
     inject: vi.fn((_services: string[], callback: (child: unknown) => void) => { callback({ effect: (effect: () => unknown) => effect(), settings: { configure } }) }),
     effect: vi.fn(),
     fiber: { restart: vi.fn(async () => {}) },
+    agents: { get: vi.fn((): { status: string; whenIdle: () => Promise<void> } | undefined => undefined) },
     get: vi.fn((name: string) => name === 'settings' ? { describe } : undefined),
     logger: { info: vi.fn(), error: vi.fn() },
   }
@@ -52,6 +54,22 @@ it('asks DSH to read its settings entry again once a restart it started finished
   expect(describe).not.toHaveBeenCalled()
   finish()
   await vi.waitFor(() => { expect(describe).toHaveBeenCalledTimes(1) })
+})
+
+it('waits for the main Session\'s running turn before restarting, so a check that turn asked for cannot abort it', async () => {
+  const { ctx } = context()
+  let idle = (): void => { throw new Error('the restart did not wait for the running turn') }
+  const whenIdle = vi.fn(() => new Promise<void>(resolve => { idle = resolve }))
+  ctx.agents.get.mockReturnValue({ status: 'running', whenIdle })
+  await apply(ctx as never, Config({ stateDir: '/srv/state' }))
+  runtimes.at(-1)!.restart()
+  // A second request while one restart is scheduled asks for nothing more.
+  runtimes.at(-1)!.restart()
+  await Promise.resolve()
+  expect(ctx.agents.get).toHaveBeenCalledWith('orchestrator-test')
+  expect(ctx.fiber.restart).not.toHaveBeenCalled()
+  idle()
+  await vi.waitFor(() => { expect(ctx.fiber.restart).toHaveBeenCalledTimes(1) })
 })
 
 it('refuses keys of the previous configuration before registering anything', async () => {

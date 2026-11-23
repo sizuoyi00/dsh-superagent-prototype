@@ -233,7 +233,10 @@ export class Runtime extends Service implements SourceHost {
     this.closingFlag = true; const passes = this.passes.stop(); this.stopped.abort()
     try {
       this.assessor.stop()
-      const ids = [this.masterId, ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
+      // Only worker Sessions are cancelled. The main Session carries the person's conversation, and its own turn is what
+      // saves the settings or asks for the setup check that restarts this plugin: cancelling it here would end that turn
+      // with "tool call aborted" for a restart it caused itself. A process exit stops it with the process.
+      const ids = this.store.tickets.list().map(ticket => workerSessionId(ticket.id))
       const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)
       for (const agent of agents) agent.cancel({ kind: 'user' }, { keepInbox: true })
       await Promise.allSettled([passes, this.effects.drain(), ...agents.map(agent => agent.whenIdle())])
