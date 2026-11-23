@@ -11,7 +11,7 @@ it('walks a Thread timeline newest first with dispositions as tags and its Decis
   await mount()
   await click(zh['tab.trigger'])
   expect(document.querySelector('.dt-ticket .dt-stage')?.textContent).toBe(zh.threadSubscribed)
-  expect(text()).toContain('扇出给 修复回归')
+  expect(text()).toContain('扇出给 SU-1 · 修复回归')
   await click('这个文案好奇怪')
   expect(document.querySelector('.dt-page-head .dt-btn')?.textContent).toBe(zh['term.trigger'])
   expect(text()).not.toContain('扇出到 1 个工单')
@@ -34,6 +34,14 @@ it('offers to send a person\'s message that reached a ticket to Eval, for one it
   const event = all('.dt-event').find(element => element.textContent?.includes('message e3'))!
   await click([...event.querySelectorAll<HTMLElement>('button')].find(button => button.textContent === zh.requeue)!)
   expect(server.requests.some(request => request.path === 'triggers/e3/requeue' && request.method === 'POST')).toBe(true)
+})
+
+it('keeps naming the Ticket a conversation became after it ended, with the key a person quotes', async () => {
+  server.threads = [threadSummary({ stage: 'dormant', tickets: [{ id: 't1', key: 'SU-1', title: '修复回归', state: 'ended' }] })]
+  await mount()
+  await click(zh['tab.trigger'])
+  expect(document.querySelector('.dt-ticket .dt-stage')?.textContent).toBe(zh.threadDormantShort)
+  expect(text()).toContain(`${zh.fanoutTo} SU-1 · 修复回归`)
 })
 
 it('filters the Thread list by activity, and unsubscribes from a Thread page after confirmation', async () => {
@@ -78,8 +86,10 @@ it('reads the page around a link\'s target once, also for a Trigger the Thread d
 it('shows a follow-up delivered to its Ticket without an Eval, a hand-back with why, and a Ticket that follows the Thread for context', async () => {
   server.threadPages = () => ({ ...threadSummary(), tickets: [ticketSummary(), ticketSummary({ id: 't2', title: '相关工单' })],
     correlated: [], decisions: [], earlier: null, context: ['t2'], url: undefined,
-    timeline: [trigger('f1', '2026-09-23T00:00:00Z', { disposition: { delivered: true, fanout: ['t1'] } }),
-      trigger('f2', '2026-09-23T00:01:00Z', { disposition: { queued: true, fanout: ['t1'], handbacks: [{ ticketId: 't1', title: '修复回归',
+    timeline: [trigger('f1', '2026-09-23T00:00:00Z', { disposition: { delivered: true, fanout: ['t1'],
+      tickets: [{ id: 't1', key: 'SU-1', title: '修复回归' }] } }),
+      trigger('f2', '2026-09-23T00:01:00Z', { disposition: { queued: true, fanout: ['t1'],
+        tickets: [{ id: 't1', key: 'SU-1', title: '修复回归' }], handbacks: [{ ticketId: 't1', title: '修复回归',
         reason: 'Asks for a new page', at: '2026-09-23T00:02:00Z' }] } })] })
   at({ page: 'trigger', id: 'feishu:oc_1:om_root' })
   await mount()
@@ -93,6 +103,10 @@ it('shows a follow-up delivered to its Ticket without an Eval, a hand-back with 
   await remount(en)
   expect(events()[1]).toEqual(['message f1', [en.dispositionDelivered], undefined])
   expect(events()[0]![2]).toBe('The Executor of “修复回归” handed it back for an Eval: Asks for a new page')
+  // Each message names the Ticket it reached by the key a person quotes, and opens it.
+  expect(all('.dt-event .dt-ticket-link').map(link => link.textContent)).toEqual(['SU-1', 'SU-1'])
+  await click(all('.dt-event .dt-ticket-link')[0]!)
+  expect(text()).toContain('修复回归')
 })
 
 /** Simulate a Thread with `count` Triggers 1 minute apart, paged 50 at a time via `before` or `around` cursors. */

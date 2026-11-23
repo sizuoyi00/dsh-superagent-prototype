@@ -25,6 +25,17 @@ it('puts every Ticket in the column of its stage, with a count per column', asyn
   expect(text()).toContain('被阻塞')
 })
 
+it('shows the conversation a Ticket came from, and opens its record when the Source has no link', async () => {
+  server.tickets.open = [ticketSummary({ id: 'a', title: '来自企信', threads: [threadSummary()] }, { stage: 'working' })]
+  await mount()
+  await click(tab(zh['tab.board']))
+  const chip = all('button.dt-chip').find(element => element.textContent?.includes(threadSummary().title))
+  expect(chip).toBeDefined()
+  expect(chip!.textContent).toContain(zh['source.feishu'])
+  await click(chip!)
+  expect(text()).toContain(zh.timeline)
+})
+
 it('filters the board by the Source a Ticket came from', async () => {
   server.tickets.open = [
     ticketSummary({ id: 'a', title: '来自定时', threads: [threadSummary({ key: 'schedule:schedule', source: 'schedule', title: '定时' })] },

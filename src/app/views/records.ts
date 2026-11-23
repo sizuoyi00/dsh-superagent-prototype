@@ -24,18 +24,20 @@ export type Owners = (trigger: Trigger) => string[]
  * The owners of follow-ups as one request reads them: the rows of a page share their tickets and Threads, so each is read
  * once however many rows it decides.
  */
-export function ownersOf(store: Pick<Store, 'tickets' | 'threads' | 'triggers'>): Owners {
+export function ownersOf(store: Pick<Store, 'tickets' | 'threads' | 'triggers'>, ticket = (id: string) => store.tickets.get(id)): Owners {
   const once = <T>(read: (id: string) => T) => {
     const seen = new Map<string, T>()
     return (id: string) => { if (!seen.has(id)) seen.set(id, read(id)); return seen.get(id) as T }
   }
-  const records = { tickets: { get: once(id => store.tickets.get(id)) }, threads: { get: once(key => store.threads.get(key)) },
+  const records = { tickets: { get: once(ticket) }, threads: { get: once(key => store.threads.get(key)) },
     triggers: store.triggers }
   return trigger => followupOwners(trigger, records)
 }
 /** One request's reads, each read once: the Threads each Ticket subscribes to, the rules by id, and the senders' names. */
 export interface Snapshot extends ViewHost {
   threadsOf(ticketId: string): Thread[]
+  /** A Ticket by id, read once per request: the rows of a page share the Tickets they name. */
+  ticket(id: string): Ticket | undefined
   /** Current rule name, falling back to `id` once a rule has been removed. */
   rule(id: string): { id: string; name: string }
   /** Resolves sender display name from policy allowlists/bot lists, falling back to the Source kind's unnamed label or raw id. */
@@ -45,6 +47,11 @@ export interface Snapshot extends ViewHost {
 }
 export function snapshot(host: ViewHost): Snapshot {
   const { store, sources } = host
+  const tickets = new Map<string, Ticket | undefined>()
+  const ticket = (id: string): Ticket | undefined => {
+    if (!tickets.has(id)) tickets.set(id, store.tickets.get(id))
+    return tickets.get(id)
+  }
   let subscribed: Map<string, Thread[]> | undefined
   const threadsOf = (ticketId: string) => {
     if (!subscribed) {
@@ -64,7 +71,7 @@ export function snapshot(host: ViewHost): Snapshot {
     const unnamed = sources.kind(source)?.policy?.unnamed
     return { source, id, name: unnamed ? human === false ? unnamed.bot : unnamed.person : named(id) }
   }
-  return { ...host, threadsOf, rule: id => ({ id, name: rules.get(id) ?? id }), actor, owners: ownersOf(store) }
+  return { ...host, threadsOf, ticket, rule: id => ({ id, name: rules.get(id) ?? id }), actor, owners: ownersOf(store, ticket) }
 }
 
 /**
@@ -96,10 +103,14 @@ export function triggerView(view: Snapshot, trigger: Trigger, threadDecisions?: 
   const unjudged = !!disposition?.filtered || decision?.kind === 'unavailable' || delivered || (!!disposition?.fanout.length && !decided)
     || (!!decision && !decided)
   const requeue = trigger.human && !queued && !evaluating && unjudged
+  // The Tickets this Trigger went to: those it started or was handed to, not those that only followed its Thread for context.
+  const targets = [...new Set([...(disposition?.fanout ?? []).filter(id => !disposition?.context?.includes(id)),
+    ...decision?.ticketId ? [decision.ticketId] : []])]
+  const tickets = targets.flatMap(id => { const ticket = view.ticket(id); return ticket ? [ticketRef(ticket)] : [] })
   return { id: trigger.id, source: trigger.source, actor: view.actor(trigger.actor, trigger.human), human: trigger.human, at: trigger.at,
     text: plain(readable(trigger.text), true),
     preview: preview(trigger.text), url: trigger.url, threads: trigger.threads.map(threadKey), actions: { requeue },
-    disposition: { queued, evaluating, delivered, filtered: disposition?.filtered, fanout: disposition?.fanout ?? [],
+    disposition: { queued, evaluating, delivered, filtered: disposition?.filtered, fanout: disposition?.fanout ?? [], tickets,
       handbacks: (disposition?.handbacks ?? []).map(item => ({ ...item,
         title: store.tickets.get(item.ticketId)?.title ?? item.ticketId })),
       decision: decision ? { id: decision.id, outcome: outcomeOf(decision), reason: decision.reason, ticketId: decision.ticketId }
@@ -115,11 +126,17 @@ function ticketNote(ticket: Ticket, stage: TicketStage): { text: string; error: 
   if ((stage.action !== 'blocked' && stage.action !== 'failed') || !summary) return undefined
   return { text: preview(summary.split('\n')[0]!), error: stage.action === 'failed' }
 }
+/** The key people quote for a Ticket, such as "SU-42". */
+const ticketKey = (number: number): string => `SU-${number}`
+/** A Ticket as its Thread or a Trigger names it: the key a person can quote, with the title that identifies it. */
+export interface TicketRef { id: string; key?: string; title: string }
+const ticketRef = (ticket: Ticket): TicketRef => ({ id: ticket.id, key: ticket.number ? ticketKey(ticket.number) : undefined,
+  title: ticket.title })
 export function ticketSummary(ticket: Ticket) {
   const stage = ticketStage(ticket)
   const note = ticketNote(ticket, stage)
   const state = liveTicket(ticket) ? 'open' as const : 'ended' as const
-  return { id: ticket.id, key: ticket.number ? `SU-${ticket.number}` : undefined, number: ticket.number,
+  return { id: ticket.id, key: ticket.number ? ticketKey(ticket.number) : undefined, number: ticket.number,
     title: ticket.title, state, ...stage, ...note ? { note } : {},
     actions: { retry: canRetry(ticket), stop: liveTicket(ticket) }, strength: ticket.mandate.strength, ended: ticket.ended,
     attention: ticket.attention && { ...ticket.attention, question: markdown(ticket.attention.question) },
@@ -165,8 +182,9 @@ function threadStage(thread: Thread, pending: number, tickets: { state: string }
 export function threadSummary(view: Snapshot, thread: Thread) {
   const { store } = view
   const tickets = thread.subscriptions.map(id => {
-    const ticket = store.tickets.get(id)
-    return { id, title: ticket?.title ?? id, state: !ticket ? 'unknown' : liveTicket(ticket) ? 'open' : 'ended' }
+    const ticket = view.ticket(id)
+    return { id, key: ticket?.number ? ticketKey(ticket.number) : undefined, title: ticket?.title ?? id,
+      state: !ticket ? 'unknown' : liveTicket(ticket) ? 'open' : 'ended' }
   })
   const pending = awaitingEval(view, thread).length
   return { key: thread.key, source: thread.ref.source, title: threadTitle(store, thread), stage: threadStage(thread, pending, tickets),
@@ -197,6 +215,7 @@ const outcomeOf = (decision: Decision): DecisionOutcome =>
 export function decisionView(view: Snapshot, decision: Decision) {
   const { store } = view
   const thread = store.threads.get(decision.threadKey)
+  const ticket = decision.ticketId ? view.ticket(decision.ticketId) : undefined
   const texts = decision.triggerIds.flatMap(id => { const trigger = store.triggers.get(id); return trigger ? [preview(trigger.text)] : [] })
   const audit = AuditSchema.parse(decision.audit ?? {})
   // Fall back to `matches` for assessments recorded by older versions.
@@ -206,6 +225,6 @@ export function decisionView(view: Snapshot, decision: Decision) {
     rules: judged.map(rule => ({ ...view.rule(rule.rule_id), matched: rule.matched, reason: rule.reason })),
     ...audit.direction ? { direction: audit.direction } : {},
     ...thread ? { threadTitle: threadTitle(store, thread) } : {}, preview: texts.join(' / '),
-    ticketTitle: decision.ticketId ? store.tickets.get(decision.ticketId)?.title : undefined }
+    ticketKey: ticket?.number ? ticketKey(ticket.number) : undefined, ticketTitle: ticket?.title }
 }
 export type DecisionView = ReturnType<typeof decisionView>

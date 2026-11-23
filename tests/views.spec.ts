@@ -7,7 +7,7 @@ import { SettingsSchema } from '../src/policy.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { feishuKind } from '../src/sources/feishu.ts'
 import { githubKind } from '../src/sources/github.ts'
-import { snapshot, threadSummary, ticketSummary, triggerView } from '../src/app/views/records.ts'
+import { decisionView, snapshot, threadSummary, ticketSummary, triggerView } from '../src/app/views/records.ts'
 import { basisFacts, ticketDetail } from '../src/app/views/tickets.ts'
 import { threadDetail } from '../src/app/views/threads.ts'
 import { droppedReplies, sourcesStatus } from '../src/app/views/sources.ts'
@@ -19,7 +19,7 @@ import { feishuLink } from '../src/sources/feishu-channel.ts'
 import { feishuChannel, feishuTriggerId } from '../src/sources/feishu-trigger.ts'
 import { githubLink } from '../src/sources/github-channel.ts'
 import { githubChannel } from '../src/sources/github-trigger.ts'
-import { followupOwners, type ChannelRef } from '../src/core/index.ts'
+import { followupOwners, type ChannelRef, type Ticket } from '../src/core/index.ts'
 
 let directory: string
 let store: Store
@@ -59,10 +59,10 @@ function views() {
 }
 const at = new Date().toISOString()
 /** A live ticket with no Assignment, as a follow-up's owner needs one. */
-const live = (id: string) => store.tickets.save({ id, title: id, decisionId: 'd', channels: [], undelivered: [], createdAt: at,
-  updatedAt: at,
+const live = (id: string, fields: Partial<Ticket> = {}) => store.tickets.save({ id, title: id, decisionId: 'd', channels: [],
+  undelivered: [], createdAt: at, updatedAt: at,
   mandate: { strength: 'explicit', policyVersion: 'v', basis: { via: 'listed' }, actor: { source: 'feishu', id: 'ou_alice' }, scope: '' },
-  origin: { triggerId: 'e0', triggerIds: ['e0'] }, assignments: [], inputs: [] })
+  origin: { triggerId: 'e0', triggerIds: ['e0'] }, assignments: [], inputs: [], ...fields })
 const message = (id: string, actor: { source: string; id: string }, human = true) => ({ id, source: actor.source,
   threads: [{ source: 'feishu', id: 'oc_1:om_root' }], actor, human, at, text: `message ${id}`, meta: {} })
 
@@ -149,6 +149,27 @@ it('does not show a follow-up that reached a ticket as waiting for an Eval, thou
   // One a person sent to Eval again waits for it.
   store.threads.save({ ...store.threads.get('feishu:oc_1:om_root')!, pending: ['f1', 'f2'] })
   expect(threadSummary(snapshot(host), store.threads.get('feishu:oc_1:om_root')!)).toMatchObject({ stage: 'queued', pending: 1 })
+})
+
+it('names the Tickets of a conversation and of a Trigger by the key people quote, also after a Ticket ended', () => {
+  const host = views()
+  live('t1', { number: 7, title: '查下这个报错' })
+  store.threads.save({ key: 'feishu:oc_1:om_root', ref: { source: 'feishu', id: 'oc_1:om_root' }, createdAt: at, subscriptions: ['t1'],
+    correlated: [], pending: [], meta: {} })
+  store.triggers.save(message('e1', { source: 'feishu', id: 'ou_alice' }))
+  store.triggers.saveDisposition('e1', { fanout: [], decisionId: 'd1', at })
+  store.decisions.save({ id: 'd1', evalId: 'ev1', threadKey: 'feishu:oc_1:om_root', triggerIds: ['e1'], policyVersion: 'v', at,
+    kind: 'accept', reason: [], strength: 'explicit', ticketId: 't1' })
+  const thread = store.threads.get('feishu:oc_1:om_root')!
+  const view = snapshot(host)
+  expect(threadSummary(view, thread).tickets).toEqual([{ id: 't1', key: 'SU-7', title: '查下这个报错', state: 'open' }])
+  expect(triggerView(view, store.triggers.get('e1')!).disposition.tickets).toEqual([{ id: 't1', key: 'SU-7', title: '查下这个报错' }])
+  expect(decisionView(view, store.decisions.get('d1')!)).toMatchObject({ ticketKey: 'SU-7', ticketTitle: '查下这个报错' })
+  // A Ticket that ended still names the conversation it became, and the Trigger keeps naming it.
+  store.tickets.save({ ...store.tickets.get('t1')!, ended: { at, by: 'executor', outcome: 'completed' } })
+  expect(threadSummary(snapshot(host), thread).tickets).toEqual([{ id: 't1', key: 'SU-7', title: '查下这个报错', state: 'ended' }])
+  expect(triggerView(snapshot(host), store.triggers.get('e1')!).disposition.tickets).toEqual([
+    { id: 't1', key: 'SU-7', title: '查下这个报错' }])
 })
 
 const load = { running: 0, queued: 0 }
