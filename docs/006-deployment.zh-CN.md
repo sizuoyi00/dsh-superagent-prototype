@@ -219,7 +219,7 @@ curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json
 
 设置检查与工作器 shell 一样，使用 DeepSeek Harness 子进程服务。它会移除名称中包含 KEY、PASSWORD、SECRET 或 TOKEN 的环境变量。
 
-设置检查会验证 GitHub 仓库和 Agent 的推送权限，写入工作器环境，并检查 git 是否仅对 github.com 使用 Agent 的凭据。飞书设置失败只会禁用飞书 Source。
+设置检查会验证 GitHub 仓库和 Agent 的推送权限，写入工作器环境，并检查 git 是否仅对 github.com 使用 Agent 的凭据。飞书设置失败只会禁用飞书 Source。关闭 GitHub Source 会一并去掉账号检查：设置检查只保留仓库名、跳过 CLI 身份验证，因此 `gh` 未登录或网络不通时，不再拖停不使用 GitHub 的那些 Source。
 
 设置检查写入的进程环境如下：
 

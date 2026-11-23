@@ -100,11 +100,16 @@ function parsed<T>(schema: z.ZodType<T>, text: string): T | undefined {
   const result = schema.safeParse(value)
   return result.success ? result.data : undefined
 }
-/** Verify the agent's GitHub CLI identity and push access to the configured repository. */
-export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<Deployment> {
+/**
+ * Verify the agent's GitHub CLI identity and push access to the configured repository.
+ * @param githubOff - the GitHub Source is switched off: keep the repository its workers commit to, but do not probe the
+ * CLI, whose signed-out or unreachable account would otherwise pause every Source that does not need GitHub at all.
+ */
+export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? '', githubOff = false): Promise<Deployment> {
   const { stateDir } = machine
   const accounts = GithubAccountsSchema.parse(github ?? {})
   const remote = accounts.repository
+  if (githubOff) return { ...machine, repository: remote, github: { cli: accounts.cli, login: '', noreply: '' } }
   if (!remote) throw new SetupError('repositoryUnset')
   if (!accounts.cli) throw new SetupError('agentCliUnset')
   let cli: string

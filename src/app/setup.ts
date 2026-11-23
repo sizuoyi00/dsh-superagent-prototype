@@ -16,6 +16,11 @@ export interface SetupHost {
 const setupFields = (settings: Settings) =>
   JSON.stringify(Object.entries(SETUP_FIELDS).map(([id, keys]) => keys.map(key => settings.sources[id]?.config[key] ?? '')))
 export const setupChanged = (before: Settings, after: Settings): boolean => setupFields(before) !== setupFields(after)
+/**
+ * Whether the GitHub Source is switched off. Such an installation runs its other Sources (Feishu, IM, manual, schedule)
+ * without a GitHub account, so a signed-out or unreachable `gh` must not pause it.
+ */
+export const githubOff = (settings: Settings): boolean => settings.sources.github?.enabled === false
 
 /**
  * Resolves the target repository, GitHub account, and optional Feishu bot by probing CLIs, then writes and applies the isolated git and shim environment used by worker processes.
@@ -43,7 +48,12 @@ export class Setup {
   configured(): boolean { return this.resolved !== undefined }
   /** Resolve deployment accounts and apply the worker environment, recording `SetupError` failures in `problem`/`feishuProblem` and rethrowing unexpected errors. */
   async run(settings: Settings): Promise<boolean> {
-    try { this.resolved = await this.resolve(settings); return true }
+    try {
+      this.resolved = await this.resolve(settings)
+      // A GitHub Source that is switched off resolves without its CLI, so a problem recorded before it was off no longer applies.
+      this.problem = undefined
+      return true
+    }
     catch (error) {
       if (!(error instanceof SetupError)) throw error
       this.problem = error.problem
@@ -61,7 +71,7 @@ export class Setup {
   async checkAccounts(block: SettingsBlock, settings: Settings): Promise<void> {
     const { machine } = this.host
     const check = block === 'source:feishu' ? resolveFeishuBot(machine, settings.sources.feishu?.config, this.probe())
-      : resolveDeployment(machine, settings.sources.github?.config, this.probe())
+      : resolveDeployment(machine, settings.sources.github?.config, this.probe(), process.env.PATH ?? '', githubOff(settings))
     await check.catch((error: unknown) => { if (!(error instanceof SetupError) || error.place === block.slice(7)) throw error })
   }
   async blockCommands(blocked: readonly string[]): Promise<void> {
@@ -76,7 +86,7 @@ export class Setup {
   private async resolve(settings: Settings): Promise<Deployment> {
     const { context, machine, lifetime } = this.host
     const probe = this.probe()
-    const deployment = await resolveDeployment(machine, settings.sources.github?.config, probe)
+    const deployment = await resolveDeployment(machine, settings.sources.github?.config, probe, process.env.PATH ?? '', githubOff(settings))
     const feishu = await resolveFeishuBot(machine, settings.sources.feishu?.config, probe).catch((error: unknown) => {
       if (!(error instanceof SetupError)) throw error
       this.feishuProblem = error.problem

@@ -65,6 +65,16 @@ describe('setup', () => {
     // A renamed repository is still resolved by its old name; notifications carry GitHub's current full_name.
     expect((await resolveDeployment(machine(), { repository: 'acme/gadgets', cli: 'gh' }, probe, path)).repository).toBe('acme/widgets')
   })
+  it('resolves a switched-off GitHub Source without probing its CLI, so an unreachable account cannot pause the other Sources', async () => {
+    const calls: string[] = []
+    const spy: Probe = async argv => { calls.push(argv.join(' ')); return probe(argv) }
+    const off = await resolveDeployment(machine(), { repository: 'acme/widgets', cli: 'gh' }, spy, path, true)
+    expect(off).toMatchObject({ repository: 'acme/widgets', github: { cli: 'gh', login: '', noreply: '' } })
+    expect(calls).toEqual([])
+    // A CLI that is not even on PATH needs no resolution either: nothing runs it while the Source is off.
+    expect((await resolveDeployment(machine(), { repository: 'acme/widgets', cli: 'missing-gh' }, probe, path, true)).github)
+      .toEqual({ cli: 'missing-gh', login: '', noreply: '' })
+  })
   it('names what setup needs and where it is set', async () => {
     const needs = (place: string, code: string, values: Record<string, unknown>, github: unknown) =>
       expect(resolveDeployment(machine(), github, probe, path)).rejects.toEqual(setupError(place, code, values))
