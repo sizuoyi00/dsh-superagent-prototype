@@ -46,7 +46,7 @@ export const ticketSummary = (fields: Partial<TicketFields> = {}, stage: TicketS
   ({ ...TICKET, ...fields, ...stage })
 export const threadSummary = (fields: Partial<ThreadRow> = {}): ThreadRow => ({
   key: 'feishu:oc_1:om_root', source: 'feishu', title: '这个文案好奇怪', stage: 'subscribed', latest: undefined, lastAt: '2026-09-23T00:00:00Z',
-  createdAt: '2026-09-22T00:00:00Z', subscriptions: 1, tickets: [{ id: 't1', title: '修复回归', state: 'open' }], evaluating: undefined,
+  createdAt: '2026-09-22T00:00:00Z', subscriptions: 1, tickets: [{ id: 't1', key: 'SU-1', title: '修复回归', state: 'open' }], evaluating: undefined,
   pending: 0, pollError: undefined, url: undefined, facts: { chat: { value: '团队群' } }, ...fields,
 })
 type TriggerFields = Partial<Omit<TriggerRow, 'disposition' | 'actions'>> & { disposition?: Partial<TriggerRow['disposition']> }
@@ -54,8 +54,8 @@ type TriggerFields = Partial<Omit<TriggerRow, 'disposition' | 'actions'>> & { di
 export function trigger(id: string, at: string, { disposition, ...fields }: TriggerFields = {}): TriggerRow {
   const row = { id, source: 'feishu', actor: actor('feishu', MEMBER), human: true, at, text: `message ${id}`, preview: `message ${id}`,
     url: undefined, threads: ['feishu:oc_1:om_root'], ...fields,
-    disposition: { queued: false, evaluating: false, delivered: false, filtered: undefined, fanout: [], handbacks: [], decision: undefined,
-      ...disposition } }
+    disposition: { queued: false, evaluating: false, delivered: false, filtered: undefined, fanout: [], tickets: [], handbacks: [],
+      decision: undefined, ...disposition } }
   return { ...row, actions: { requeue: requeueable(row) } }
 }
 const requeueable = ({ human, disposition: d }: Pick<TriggerRow, 'human' | 'disposition'>) => human && !d.queued && !d.evaluating
@@ -203,7 +203,7 @@ const overviewView = (): ApiResponse<'GET overview'> => {
 }
 export const acceptDecision = (): NonNullable<TicketPageView['decision']> => ({ id: 'd1', kind: 'accept', outcome: 'accept',
   reason: [{ code: 'explicitRouted' }], at: '2026-09-22T00:00:00Z', strength: 'explicit', ticketId: undefined,
-  triggerIds: ['e1'], thread: 'feishu:oc_1:om_root', rules: [], preview: '@bot 修一下', ticketTitle: undefined })
+  triggerIds: ['e1'], thread: 'feishu:oc_1:om_root', rules: [], preview: '@bot 修一下', ticketKey: undefined, ticketTitle: undefined })
 const ticketDetail = (): TicketPageView => ({
   ...ticketSummary(), paused: false, decision: acceptDecision(), threads: [threadSummary()],
   mandate: { strength: 'explicit', policyVersion: 'abcdef1234567890', basis: { via: 'addressed', sender: 'Alice', addressed: 'mention' },

@@ -277,14 +277,22 @@ div.dt-preview-head { color: var(--dsw-alias-label-secondary); }
 .dt-lv { white-space: nowrap; }
 .dt-lv-label { color: var(--dsw-alias-label-caption); }
 .dt-lv-value { color: var(--dsw-alias-label-secondary); font-variant-numeric: tabular-nums; }
-.dt-chip { display: inline-flex; flex-wrap: wrap; max-width: 100%; border: 0.5px solid var(--dsw-alias-border-l3); border-radius: 6px; overflow: hidden; font-size: 11px; line-height: 18px; color: var(--dsw-alias-label-secondary); }
-.dt-chip-source { padding: 0 6px; color: var(--dsw-alias-label-tertiary); background: var(--dsw-alias-bg-module-platform); }
+.dt-chip { display: inline-flex; flex-wrap: wrap; max-width: 100%; min-width: 0; border: 0.5px solid var(--dsw-alias-border-l3); border-radius: 6px; overflow: hidden; font-size: 11px; line-height: 18px; color: var(--dsw-alias-label-secondary); }
+.dt-chip-source { flex: none; padding: 0 6px; color: var(--dsw-alias-label-tertiary); background: var(--dsw-alias-bg-module-platform); white-space: nowrap; }
+/* The conversation a Ticket came from, readable on the row and cut to the space it has. */
+.dt-chip-title { flex: 0 1 auto; min-width: 0; max-width: 18em; padding: 0 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dt-chip-conversation { flex-wrap: nowrap; }
+/* A board card is too narrow for the Source and the title on one line: the Source keeps its own, above the title. */
+.dt-board .dt-chip-conversation { flex-wrap: wrap; }
+.dt-board .dt-chip-conversation .dt-chip-source { flex-basis: 100%; }
+.dt-board .dt-chip-conversation .dt-chip-title { flex: 1 1 0; }
+button.dt-chip { padding: 0; background: none; font: inherit; color: inherit; text-align: left; }
 .dt-chip-fact { padding: 0 6px; border-left: 0.5px solid var(--dsw-alias-border-l3); white-space: nowrap; }
 .dt-chip-label { margin-right: 4px; color: var(--dsw-alias-label-caption); }
 .dt-chip-link { position: relative; z-index: 1; text-decoration: none; cursor: pointer; transition: border-color 120ms ease; }
 .dt-chip-link:hover { border-color: var(--dsw-alias-brand-primary); }
 .dt-chip-link:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
-.dt-chip-open { display: inline-flex; align-items: center; padding: 0 5px; border-left: 0.5px solid var(--dsw-alias-border-l3); color: var(--dsw-alias-brand-primary); }
+.dt-chip-open { display: inline-flex; flex: none; align-items: center; padding: 0 5px; border-left: 0.5px solid var(--dsw-alias-border-l3); color: var(--dsw-alias-brand-primary); }
 .dt-chip-problem, .dt-chip-problem .dt-chip-label { color: var(--dsw-alias-state-error-primary); }
 .dt-cards { gap: 8px; }
 .dt-att .dt-inline-link { font-size: 13px; font-weight: 500; }
