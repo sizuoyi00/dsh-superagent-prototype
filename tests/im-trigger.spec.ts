@@ -75,6 +75,19 @@ describe('the Trigger one message builds', () => {
     expect(imTrigger(session, message({ fullSenderId: 'BOT.360.fs_1', senderId: 7 }), self).human).toBe(false)
     expect(imTrigger(session, message(), self).human).toBe(true)
   })
+  it('quotes the question itself, not the topic it was posted under, and @s its author in a group', () => {
+    const trigger = imTrigger(session, message({ replyMessageVo: { messageId: 5, fullSenderId: 'E.fs.7' }, fullSenderId: 'E.fs.42' }), self)
+    expect(trigger.threads[0]!.id).toBe('s1:5')
+    expect(trigger.channel!.address).toEqual({ sessionId: 's1', messageId: '10', mention: 'E.fs.42' })
+  })
+  it('does not @ anyone in a private chat, or on a message a bot or the account itself wrote', () => {
+    expect(imTrigger(direct, message({ fullSenderId: 'E.fs.42' }), self).channel!.address).toEqual({ sessionId: 's2', messageId: '10' })
+    expect(imTrigger(session, message({ fullSenderId: 'BOT.360.fs_1', senderId: 7 }), self).channel!.address).toEqual({ sessionId: 's1', messageId: '10' })
+    expect(imTrigger(session, message({ senderId: self.id, fullSenderId: 'E.fs.9766' }), self).channel!.address).toEqual({ sessionId: 's1', messageId: '10' })
+  })
+  it('names a sender without a full id by the internal employee form 企信 uses', () => {
+    expect(imTrigger(session, message(), self).channel!.address).toEqual({ sessionId: 's1', messageId: '10', mention: 'E.fs.42' })
+  })
 })
 
 describe('own messages', () => {

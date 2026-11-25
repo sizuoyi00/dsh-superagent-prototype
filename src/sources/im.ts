@@ -115,7 +115,7 @@ export const imKind: SourceKind<ImConfig> = {
     // A reply goes only to a session the Source still receives.
     allowed: (address, config) => imKind.scope!({ meta: { sessionId: address.sessionId ?? '', direct: address.direct === 'true' } }, config).listened,
     async send(host, message: OutboundMessage) {
-      const { sessionId, messageId } = message.channel.address
+      const { sessionId, messageId, mention } = message.channel.address
       if (!sessionId) throw new Error('Missing 企信 reply target')
       const text = checkedImText(message.text)
       employee ||= `E.fs.${(await readSelf(host.commands)).id}`
@@ -125,7 +125,7 @@ export const imKind: SourceKind<ImConfig> = {
         await host.commands.run(CLI, ['im', 'message', 'send-file', '--sessionId', sessionId, '--path', uploaded.path, '--fileName', file.name])
       }
       if (!text.trim()) return 'sent'
-      const payload = rtcPayload(text, sessionId, employee, messageId)
+      const payload = rtcPayload(text, sessionId, employee, messageId, mention)
       try { await host.commands.run(CLI, ['im', 'message', 'send', '--data', JSON.stringify(payload)]) }
       catch (error) {
         // A recalled message, a session the agent left, or a message it may no longer see: the reply can never arrive.
@@ -193,16 +193,18 @@ let employee = ''
 const rtcBody = (text: string) => ({ type: 'doc', content: [{ append: false, index: -1, type: 'text', supportMarkdown: true, text,
   marks: [{ type: 'textStyle', attrs: { color: '#181C25', fontSize: '13px' }, attrsForMobile: { color: '#181C25', fontSize: '13px' } }] }] })
 /**
- * The RTC envelope `im message send --data` takes: a markdown body and hidden header/footer. `--markdownFormat` on
- * `send-txt` folds a whole reply into one paragraph, which is why replies go through this message type instead.
+ * The RTC envelope `im message send --data` takes: a markdown body, hidden header/footer, the message the reply quotes
+ * (`replyMessageId`), and the person a group reply @s (`mentionAtFullUserIdList`, whose full employee ids look like
+ * `E.fs.<id>`). `--markdownFormat` on `send-txt` folds a whole reply into one paragraph, which is why replies go through
+ * this message type instead.
  */
-export function rtcPayload(text: string, sessionId: string, employeeId: string, replyTo?: string) {
+export function rtcPayload(text: string, sessionId: string, employeeId: string, replyTo?: string, mention?: string) {
   const rtc = { header: { content: JSON.stringify({ type: 'doc', content: [] }), headerBizTitle: 'AI_AGENT_BIZ', hide: true },
     body: { content: JSON.stringify(rtcBody(text)), hasRichText: true },
     footer: { content: JSON.stringify({ type: 'doc', content: [] }), hide: true },
     link: '', mobileLink: '', mockText: true, disableGlobalUrl: true, version: 'V2' }
   return { sessionId, messageType: 'RTC', messageContent: JSON.stringify(rtc), env: 0, 'authInfo.employeeId': employeeId,
-    ...replyTo ? { replyMessageId: Number(replyTo) } : {} }
+    ...replyTo ? { replyMessageId: Number(replyTo) } : {}, ...mention ? { mentionAtFullUserIdList: [mention] } : {} }
 }
 
 export const name = 'dsh-superagent-im'

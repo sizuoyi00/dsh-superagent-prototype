@@ -95,6 +95,19 @@ export const imDirect = (session: ImSession): boolean =>
   session.sessionCategory === DIRECT || session.sessionCategory === BOT_CHAT
 /** The agent's own bot conversation, where whatever a person types is meant for the agent. */
 export const imBotChat = (session: ImSession): boolean => session.sessionCategory === BOT_CHAT
+/** Whether a person wrote the message; a bot's message is never a request to answer. */
+export const imHuman = (message: ImMessage): boolean => !/^BOT\./.test(message.fullSenderId ?? '')
+/**
+ * The full employee id a group reply should @, which 企信's send path takes as `mentionAtFullUserIdList`. A private chat
+ * needs no mention, and a bot's message has no person to @. A message that omits its full sender id still names an
+ * internal employee by its numeric id (`E.fs.<id>`, the same form a mention of the agent uses).
+ */
+const imMention = (session: ImSession, message: ImMessage, self: ImSelf): string | undefined => {
+  if (imDirect(session) || !imHuman(message)) return undefined
+  // The full id, not the numeric one, distinguishes the account in a cross-enterprise conversation.
+  if (sameSender(message.fullSenderId, self) || (!message.fullSenderId && message.senderId === self.id)) return undefined
+  return message.fullSenderId ?? `E.fs.${message.senderId}`
+}
 /**
  * Whether the message is addressed to the agent: a bot conversation, a quote of the agent's own message, or a mention of
  * its name or identity. In a direct chat between people, a message from someone else asks the account the agent stands
@@ -122,9 +135,12 @@ export const sameSender = (fullId: string | null | undefined, self: ImSelf): boo
 /** Thread key of a message: its chat plus the message that anchors the topic (the quoted one, else itself). */
 export const imThreadId = (session: ImSession, message: ImMessage): string =>
   `${session.sessionId}:${imQuote(message)?.messageId ?? message.messageId}`
-/** Channel of a message: the chat it belongs to and the message a reply attaches to. */
-export const imChannel = (session: ImSession, message: ImMessage) =>
-  ({ source: SOURCE, thread: `${SOURCE}:${imThreadId(session, message)}`, address: { sessionId: session.sessionId, messageId: String(message.messageId) } })
+/** Channel of a message: the chat it belongs to, the message a reply quotes, and, in a group, whom the reply @s. */
+export const imChannel = (session: ImSession, message: ImMessage, self: ImSelf) => {
+  const mention = imMention(session, message, self)
+  return { source: SOURCE, thread: `${SOURCE}:${imThreadId(session, message)}`, address: { sessionId: session.sessionId,
+    messageId: String(message.messageId), ...mention ? { mention } : {} } }
+}
 /** One trigger id per message version, so an edited message is a new Trigger and a repolled one is not. */
 export const imTriggerId = (message: ImMessage): string => key('im-message', String(message.messageId), String(message.messageVersion ?? 0))
 /** Builds the Trigger for one message. */
@@ -133,9 +149,9 @@ export function imTrigger(session: ImSession, message: ImMessage, self: ImSelf):
   const quote = imQuote(message)
   return { id: imTriggerId(message), source: SOURCE, threads: [{ source: SOURCE, id: imThreadId(session, message) }],
     actor: { source: SOURCE, id: String(message.senderId), ...(message.senderName ? { name: message.senderName } : {}) },
-    human: !/^BOT\./.test(message.fullSenderId ?? ''),
+    human: imHuman(message),
     at: new Date(message.messageTime).toISOString(), text: imText(message),
-    ...(addressed ? { addressed } : {}), channel: imChannel(session, message),
+    ...(addressed ? { addressed } : {}), channel: imChannel(session, message, self),
     meta: { sessionId: session.sessionId, messageId: message.messageId, ...(session.sessionName ? { sessionName: session.sessionName } : {}),
       direct: imDirect(session), ...(quote ? { quoted: quote.messageId, quotedSender: quote.fullSenderId ?? null } : {}) } }
 }
