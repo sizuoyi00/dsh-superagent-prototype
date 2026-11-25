@@ -18,10 +18,10 @@ export function TicketLine({ ticket, question, onChanged, context }: {
   return <li className="dt-row dt-link dt-ticket" data-state={question ? status.dot : undefined}>
     <div className="dt-ticket-stage"><StageMark state={status.dot} icon={status.icon} label={status.label} /></div>
     <div className="dt-ticket-body">
-      <div className="dt-row-title"><button type="button" className="dt-open" onClick={() => navigate({ page: 'execution',
-        id: ticket.id })}>{ticket.title}</button></div>
+      <div className="dt-row-title">{ticket.key && <span className="dt-key">{ticket.key}</span>}
+        <button type="button" className="dt-open" onClick={() => navigate({ page: 'execution', id: ticket.id })}>{ticket.title}</button></div>
       <div className="dt-row-meta dt-ticket-meta">
-        {ticket.threads.map(thread => <ThreadChip key={thread.key} thread={thread} />)}
+        {ticket.threads.map(thread => <ThreadChip key={thread.key} thread={thread} showTitle />)}
         {context && <ContextTag />}
         {ticket.undelivered > 0 && <LabelValue label={t('ticketUndeliveredLabel')} value={ticket.undelivered} />}
         {note ? <span className={note.error ? 'dt-ticket-note dt-ticket-note-error' : 'dt-ticket-note'} title={note.text}>{note.text}</span>
@@ -50,9 +50,13 @@ function ContextTag() {
 /** Thread list row; on a Ticket page, `ticketId` omits that Ticket from fanout targets and `context` marks context-only threads. */
 export function ThreadLine({ thread, ticketId, context }: { thread: ThreadRow; ticketId?: string; context?: boolean }) {
   const { t, navigate } = usePanel()
-  const live = thread.tickets.filter(ticket => ticket.state === 'open' && ticket.id !== ticketId)
+  const related = thread.tickets.filter(ticket => ticket.id !== ticketId)
+  const live = related.filter(ticket => ticket.state === 'open')
   const { dot, icon, label } = threadMark(t, thread)
-  const reaches = live.length > 0 && `${live[0]!.title}${live.length > 1 ? t('andMore', { count: live.length - 1 }) : ''}`
+  // A conversation keeps naming the Ticket it became after that Ticket ended, so its key still identifies the work.
+  const shown = live.length ? live : related
+  const named = (ticket: typeof related[number]) => ticket.key ? `${ticket.key} · ${ticket.title}` : ticket.title
+  const reaches = shown.length > 0 && `${named(shown[0]!)}${shown.length > 1 ? t('andMore', { count: shown.length - 1 }) : ''}`
   return <li className="dt-row dt-link dt-ticket">
     <div className="dt-ticket-stage"><StageMark state={dot} icon={icon} label={label} /></div>
     <div className="dt-ticket-body">
@@ -101,18 +105,29 @@ export function DecisionLine({ decision }: { decision: DecisionRow }) {
   </li>
 }
 
-function ThreadChip({ thread }: { thread: Pick<ThreadFacts, 'source' | 'facts' | 'url' | 'title'> }) {
-  const { t } = usePanel()
+/**
+ * A Thread as a chip: its Source, its facts, and on a Ticket row the conversation's title, so a person sees which
+ * conversation the work came from. A linked Thread opens its original; one without a link opens the panel's record of it.
+ */
+function ThreadChip({ thread, showTitle }: { thread: Pick<ThreadFacts, 'key' | 'source' | 'facts' | 'url' | 'title'>; showTitle?: boolean }) {
+  const { t, navigate } = usePanel()
   const cells = <>
     <span className="dt-chip-source">{valueLabel(t, 'source', thread.source)}</span>
+    {showTitle && <span className="dt-chip-title">{readableMarkers(t, thread.title)}</span>}
     {Object.entries(thread.facts).map(([id, fact]) => <span key={id} className={fact.problem ? 'dt-chip-fact dt-chip-problem'
       : 'dt-chip-fact'}>
       {fact.label && <span className="dt-chip-label">{localized(t, fact.label)}</span>}{localized(t, fact.value)}
     </span>)}
   </>
-  return thread.url ? <a className="dt-chip dt-chip-link" href={thread.url} target="_blank" rel="noopener noreferrer" title={thread.title}>
+  if (thread.url) return <a className={`dt-chip dt-chip-link${showTitle ? ' dt-chip-conversation' : ''}`} href={thread.url}
+    target="_blank" rel="noopener noreferrer" title={thread.title}>
     {cells}<span className="dt-chip-open"><Icon name="external" size={11} /></span>
-  </a> : <span className="dt-chip">{cells}</span>
+  </a>
+  if (showTitle) return <button type="button" className="dt-chip dt-chip-link dt-chip-conversation" title={thread.title}
+    onClick={() => navigate({ page: 'trigger', id: thread.key })}>
+    {cells}<span className="dt-chip-open"><Icon name="chevron-right" size={11} /></span>
+  </button>
+  return <span className="dt-chip">{cells}</span>
 }
 
 type Run<I> = { item: I; earlier: I[] }

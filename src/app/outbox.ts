@@ -1,7 +1,7 @@
 /** Reliable outbound message delivery backed by persistent receipts and retried reply effects. */
 import type { OutboundMessage, Outbox as OutboxPort, ReplyStatus } from '../core/index.ts'
 import type { Commands } from '../infra/commands.ts'
-import { checkedImText } from '../infra/text.ts'
+import { checkedImText, Permanent } from '../infra/text.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import { FAILURES_BEFORE_ERROR, Later, type Effects } from './effects.ts'
 import type { Store } from './store.ts'
@@ -45,7 +45,11 @@ export class Outbox implements OutboxPort {
     if (store.receipts.behind(id, FAILURES_BEFORE_ERROR)) throw new Later('An earlier message of this ticket to this conversation waits')
     if (!sources.channelAllowed(receipt.channel)) { store.receipts.settle(receipt, 'channelIgnored'); return }
     // A permanently unreachable target (such as a recalled message or deleted Issue) settles as `channelGone` so its receipt prevents retries.
-    const result = await sources.send(receipt, commands)
+    const result = await sources.send(receipt, commands).catch((error: unknown) => {
+      // Text the target will never accept is dropped, not retried: a retry cannot shorten it.
+      if (error instanceof Permanent) { store.receipts.settle(receipt, 'channelGone'); return 'gone' as const }
+      throw error
+    })
     if (result === 'waiting') throw new Later('The Source is not installed')
     store.receipts.settle(receipt, result === 'gone' ? 'channelGone' : 'sent')
   }

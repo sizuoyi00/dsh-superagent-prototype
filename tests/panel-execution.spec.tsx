@@ -16,7 +16,7 @@ it('lists Tickets under Execution by who they wait on, with the Executor state a
   expect(document.querySelector('.dt-status-title')?.textContent).toBe(zh.statusTitle)
   expect(server.requests.some(request => request.path === 'tickets?state=open&limit=20')).toBe(true)
   expect(text()).toContain(zh.executorRunning)
-  expect(all('.dt-chip').map(chip => chip.textContent)).toContain('GitHub#7自动合并已开启')
+  expect(all('.dt-chip').map(chip => chip.textContent)).toContain('GitHub#7 x#7自动合并已开启')
   await click(zh.idleLabel)
   expect(server.requests.some(request => request.path === 'tickets?state=idle&limit=20')).toBe(true)
   expect(text()).toContain('执行器结束了当前回合')

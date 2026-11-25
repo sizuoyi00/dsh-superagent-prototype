@@ -30,7 +30,6 @@ function TriggerItem({ trigger, earlier, target, subscribed, requeue }: {
   requeue: { busy: boolean; run: () => void } | undefined
 }) {
   const { t, navigate } = usePanel()
-  const ticketId = trigger.disposition.decision?.ticketId
   const scroll = (element: HTMLLIElement | null) => {
     if (element && target === trigger.id
       && !element.dataset.scrolled) { element.dataset.scrolled = '1'; element.scrollIntoView?.({ block: 'center' }) }
@@ -45,8 +44,8 @@ function TriggerItem({ trigger, earlier, target, subscribed, requeue }: {
       reason: item.reason })}</Hint>)}
     <div className="dt-event-foot">
       {triggerTags(t, trigger, subscribed)}
-      {ticketId && !subscribed.has(ticketId) && <button type="button" className="dt-textlink dt-icon-link"
-        onClick={() => navigate({ page: 'execution', id: ticketId })}>{t('openTicket')}</button>}
+      {trigger.disposition.tickets.map(ticket => <button key={ticket.id} type="button" className="dt-textlink dt-icon-link dt-ticket-link"
+        title={ticket.title} onClick={() => navigate({ page: 'execution', id: ticket.id })}>{ticket.key ?? t('openTicket')}</button>)}
       {requeue && <button type="button" className="dt-textlink dt-icon-link dt-reveal" disabled={requeue.busy} aria-busy={requeue.busy}
         onClick={requeue.run}>
         <Icon name="refresh" size={13} />{t('requeue')}

@@ -26,6 +26,12 @@ const STATUS_REQUEST = 'Report the current ticket status with orchestrator_repor
  * Coordinates with Replies for the acknowledgement an accept carries and with Executor to start, deliver to, and stop assignments.
  * Intake, Evals, Assignments, and Engine delegate ticket and subscription mutations here.
  */
+/** A receipt names the ticket it is for, so the person can quote it later; the number exists only once the ticket does. */
+export function withTicketKey(text: string, number: number): string {
+  const key = `SU-${number}`
+  return text.includes(key) ? text : `${text.trimEnd()}（${key}）`
+}
+
 export class Tickets extends EnginePart {
   constructor(options: EngineOptions, private readonly replies: Replies) { super(options) }
 
@@ -40,7 +46,9 @@ export class Tickets extends EnginePart {
     // Fall back to the last trigger for Evals recorded before `primary` existed.
     const primary = this.repo.triggers.get(evaluation.primary ?? triggerIds.at(-1)!)
     const origin = { triggerId: primary?.id ?? triggerIds[0]!, triggerIds }
-    let ticket: Ticket = { id, title: outcome.title, decisionId, mandate, channels: [], assignments: [], inputs: [], undelivered: [],
+    // The number is what a person quotes when they ask about the ticket, so it never repeats and never changes.
+    const number = this.repo.tickets.list().reduce((highest, item) => Math.max(highest, item.number ?? 0), 0) + 1
+    let ticket: Ticket = { id, number, title: outcome.title, decisionId, mandate, channels: [], assignments: [], inputs: [], undelivered: [],
       createdAt: at, updatedAt: at, origin }
     for (const triggerId of triggerIds) {
       const channel = this.repo.triggers.get(triggerId)?.channel
@@ -50,7 +58,7 @@ export class Tickets extends EnginePart {
     const assignment = this.newAssignment(ticket)
     this.repo.tickets.save(ticket)
     for (const triggerId of triggerIds) for (const ref of this.repo.triggers.get(triggerId)?.threads ?? []) this.subscribe(id, ref)
-    if (outcome.acknowledgement && primary) this.replies.acknowledgeAccepted(id, primary, outcome.acknowledgement)
+    if (outcome.acknowledgement && primary) this.replies.acknowledgeAccepted(id, primary, withTicketKey(outcome.acknowledgement, number))
     this.options.executor.start(this.require(id), assignment)
     this.emit('ticket.created', { ticketId: id, decisionId, strength: mandate.strength })
   }

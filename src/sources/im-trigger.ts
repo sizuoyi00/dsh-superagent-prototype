@@ -1,0 +1,157 @@
+/** Normalizes 企信 (ShareCRM IM) sessions and messages into domain Triggers. */
+import { z } from 'zod'
+import { key, type Trigger } from '../core/index.ts'
+
+export const SOURCE = 'im'
+/** A participant of a session: `E` an employee, `BOT` a bot. */
+export const ImParticipantSchema = z.looseObject({ participantId: z.number(), enterpriseAccount: z.string().optional(), type: z.string() })
+/** A 企信 session (a group `T`, a direct chat `D`, or a system channel such as `OSS1`). */
+export const ImSessionSchema = z.looseObject({
+  sessionId: z.string(),
+  sessionName: z.string().nullish(),
+  sessionCategory: z.string().nullish(),
+  participants: z.array(ImParticipantSchema).default([]),
+  lastMessageId: z.number().nullish(),
+  lastMessageTime: z.number().nullish(),
+})
+export type ImSession = z.infer<typeof ImSessionSchema>
+/** A quoted message: 企信 returns it beside the quoting message, without the quoted message's own text in some cases. */
+export const ImQuoteSchema = z.looseObject({ messageId: z.number(), fullSenderId: z.string().nullish(), senderName: z.string().nullish(),
+  content: z.string().nullish(), messageTime: z.number().nullish() })
+/** One 企信 message; `messageType` is `T` for text and other letter codes for images, files, cards and system events. */
+export const ImMessageSchema = z.looseObject({
+  messageId: z.number(),
+  previousMessageId: z.number().nullish(),
+  senderId: z.number(),
+  senderName: z.string().nullish(),
+  fullSenderId: z.string().nullish(),
+  messageTime: z.number(),
+  messageType: z.string(),
+  content: z.string().nullish(),
+  messageVersion: z.number().nullish(),
+  private: z.boolean().nullish(),
+  replyMessageVo: ImQuoteSchema.nullish(),
+  replyMessage: ImQuoteSchema.nullish(),
+  quoteMessageVo: ImQuoteSchema.nullish(),
+  atList: z.array(z.unknown()).nullish(),
+  mentionList: z.array(z.unknown()).nullish(),
+  atFullUserIdList: z.array(z.string()).nullish(),
+  /** Set by the AI send path, for example `本内容由 ShareAgent 生成`; a message a person typed has none. */
+  tagFromLabel: z.string().nullish(),
+})
+export type ImMessage = z.infer<typeof ImMessageSchema>
+/** What the Source knows about its own identity, so it can drop its own messages and recognize messages addressed to it. */
+export interface ImSelf { id: number; fullId: string; names: string[] }
+/** Placeholder for a message type without text, so meaning is preserved without reading the payload. */
+const PLACEHOLDER: Record<string, string> = { I: '[图片]', F: '[文件]', V: '[语音]', MIX: '[图文]', UGT: '[卡片]', RTC: '[卡片]', S: '[系统消息]' }
+/** The readable text of a message: its content for text, the text elements of a rich message, a placeholder otherwise. */
+export function imText(message: ImMessage): string {
+  const content = message.content ?? ''
+  if (message.messageType === 'T') return content
+  const rich = richMessage(content)
+  if (rich) return rich
+  return PLACEHOLDER[message.messageType] ?? `[${message.messageType}]`
+}
+/**
+ * A rich message keeps its parts in `elements`: `T` holds text, `I` an image. The caption of a card is often the only
+ * place a request is written, so it becomes the message's text and an image is named beside it.
+ */
+function richMessage(content: string): string | undefined {
+  let value: unknown
+  try { value = JSON.parse(content) } catch { return undefined /* Not a rich message; the caller uses a placeholder. */ }
+  const elements = (value as { elements?: unknown }).elements
+  if (Array.isArray(elements)) {
+    const texts: string[] = []
+    let images = 0
+    for (const element of elements) {
+      if (!element || typeof element !== 'object') continue
+      const { type, content: body } = element as { type?: unknown; content?: unknown }
+      if (type === 'T' && typeof body === 'string' && body.trim()) texts.push(body.trim())
+      if (type === 'I') images++
+    }
+    const parts = [...images ? [`[图片${images > 1 ? `×${images}` : ''}]`] : [], ...texts]
+    return parts.length ? parts.join('\n') : undefined
+  }
+  const text = (value as { text?: unknown }).text
+  return typeof text === 'string' && text.trim() ? text.trim() : undefined
+}
+/** The message this one quotes, when 企信 returned it. */
+export const imQuote = (message: ImMessage): z.infer<typeof ImQuoteSchema> | undefined =>
+  message.replyMessageVo ?? message.replyMessage ?? message.quoteMessageVo ?? undefined
+/**
+ * True when the message was sent by the agent itself: the account's own id together with the AI marker the send path
+ * appends. The account's own id alone means the person wrote it in their own client, which the agent does answer.
+ */
+export const imOwn = (message: ImMessage, self: ImSelf): boolean => message.senderId === self.id && !!message.tagFromLabel
+/**
+ * 企信 session kinds: `D` is a group, `S` is a direct chat between people, `C` a parent of a cross-enterprise
+ * conversation, and `OSS1`, `BOT`, `TODO`, `CRM`, `SS` are system channels. A direct chat addresses the account the
+ * agent answers for; a bot conversation is held with the agent itself.
+ */
+export const DIRECT = 'S'
+export const BOT_CHAT = 'BOT'
+/** A direct chat or a bot conversation is private, so the direct-messages switch decides whether it is read. */
+export const imDirect = (session: ImSession): boolean =>
+  session.sessionCategory === DIRECT || session.sessionCategory === BOT_CHAT
+/** The agent's own bot conversation, where whatever a person types is meant for the agent. */
+export const imBotChat = (session: ImSession): boolean => session.sessionCategory === BOT_CHAT
+/** Whether a person wrote the message; a bot's message is never a request to answer. */
+export const imHuman = (message: ImMessage): boolean => !/^BOT\./.test(message.fullSenderId ?? '')
+/**
+ * The full employee id a group reply should @, which 企信's send path takes as `mentionAtFullUserIdList`. A private chat
+ * needs no mention, and a bot's message has no person to @. A message that omits its full sender id still names an
+ * internal employee by its numeric id (`E.fs.<id>`, the same form a mention of the agent uses).
+ */
+const imMention = (session: ImSession, message: ImMessage, self: ImSelf): string | undefined => {
+  if (imDirect(session) || !imHuman(message)) return undefined
+  // The full id, not the numeric one, distinguishes the account in a cross-enterprise conversation.
+  if (sameSender(message.fullSenderId, self) || (!message.fullSenderId && message.senderId === self.id)) return undefined
+  return message.fullSenderId ?? `E.fs.${message.senderId}`
+}
+/**
+ * Whether the message is addressed to the agent: a bot conversation, a quote of the agent's own message, or a mention of
+ * its name or identity. In a direct chat between people, a message from someone else asks the account the agent stands
+ * in for; the account's own words are meant for those people and count only when they name the agent. 企信 returns
+ * mentions as text in the content, and as an id list for some message types.
+ */
+export function imAddressed(message: ImMessage, session: ImSession, self: ImSelf): 'mention' | 'direct' | undefined {
+  if (imBotChat(session)) return 'direct'
+  const quote = imQuote(message)
+  // 企信 quotes carry the quoted sender's full id, which for a person is `E.fs.<senderId>`.
+  if (quote && sameSender(quote.fullSenderId, self)) return 'direct'
+  const ids = message.atFullUserIdList ?? []
+  if (ids.some(id => id.includes(String(self.id)))) return 'mention'
+  // A mention is text only: `@` followed by the display name. Rich-text and card messages keep their mention in the raw
+  // content, so matching runs on that rather than on the placeholder the model sees.
+  const text = message.content ?? ''
+  if (self.names.some(name => name && text.includes(`@${name}`))) return 'mention'
+  // The account's own words are it talking to others; only the addresses above make them a request to the agent.
+  if (message.senderId !== self.id && imDirect(session)) return 'direct'
+  return undefined
+}
+/** Whether a full sender id names the agent: `E.fs.<id>` is the account's own id, and a bot may carry it too. */
+export const sameSender = (fullId: string | null | undefined, self: ImSelf): boolean =>
+  !!fullId && (fullId === self.fullId || fullId.endsWith(`.${self.id}`) || fullId.includes(`fs.${self.id}`))
+/** Thread key of a message: its chat plus the message that anchors the topic (the quoted one, else itself). */
+export const imThreadId = (session: ImSession, message: ImMessage): string =>
+  `${session.sessionId}:${imQuote(message)?.messageId ?? message.messageId}`
+/** Channel of a message: the chat it belongs to, the message a reply quotes, and, in a group, whom the reply @s. */
+export const imChannel = (session: ImSession, message: ImMessage, self: ImSelf) => {
+  const mention = imMention(session, message, self)
+  return { source: SOURCE, thread: `${SOURCE}:${imThreadId(session, message)}`, address: { sessionId: session.sessionId,
+    messageId: String(message.messageId), ...mention ? { mention } : {} } }
+}
+/** One trigger id per message version, so an edited message is a new Trigger and a repolled one is not. */
+export const imTriggerId = (message: ImMessage): string => key('im-message', String(message.messageId), String(message.messageVersion ?? 0))
+/** Builds the Trigger for one message. */
+export function imTrigger(session: ImSession, message: ImMessage, self: ImSelf): Trigger {
+  const addressed = imAddressed(message, session, self)
+  const quote = imQuote(message)
+  return { id: imTriggerId(message), source: SOURCE, threads: [{ source: SOURCE, id: imThreadId(session, message) }],
+    actor: { source: SOURCE, id: String(message.senderId), ...(message.senderName ? { name: message.senderName } : {}) },
+    human: imHuman(message),
+    at: new Date(message.messageTime).toISOString(), text: imText(message),
+    ...(addressed ? { addressed } : {}), channel: imChannel(session, message, self),
+    meta: { sessionId: session.sessionId, messageId: message.messageId, ...(session.sessionName ? { sessionName: session.sessionName } : {}),
+      direct: imDirect(session), ...(quote ? { quoted: quote.messageId, quotedSender: quote.fullSenderId ?? null } : {}) } }
+}

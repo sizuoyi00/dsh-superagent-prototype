@@ -4,6 +4,9 @@
 `status`, `start`, and `restart` exit 0 while the service runs normally; 1 when it is stopped, duplicated, unreachable, or
 reporting a runtime error, which `restart` may fix; 2 when it runs while a component such as a Source reports an error;
 and 3 when it runs and waits for setup. A restart fixes neither 2 nor 3: they need a person.
+
+A profile that systemd already supervises is handed back to `systemctl --user`, because a unit and this script cannot both
+own it: stopping the unit's process only makes systemd restart it while this script starts a second instance.
 """
 
 import argparse
@@ -63,14 +66,19 @@ def ps(*options, check=False):
             yield int(parts[0]), parts[1], parts[2].split()
 
 
+def service_name(name):
+    """Return whether `comm` names a DSH runtime process (Node 25 reports its main thread as `node-MainThread`)."""
+    return name in ('node', 'dsh') or name.startswith('node-')
+
+
 def running(pid, profile):
     """Return whether `pid` is currently running the DSH service for `profile` (`ps -p` returns nothing once exited)."""
-    return any(found == pid and name in ('node', 'dsh') and serves(args, profile) for found, name, args in ps('-p', str(pid)))
+    return any(found == pid and service_name(name) and serves(args, profile) for found, name, args in ps('-p', str(pid)))
 
 
 def processes(profile):
     """Return PIDs of all running DSH service processes for `profile`, including instances started outside this script and the recorded `service.pid` while still running."""
-    found = [pid for pid, name, args in ps('-ax', check=True) if name in ('node', 'dsh') and serves(args, profile)]
+    found = [pid for pid, name, args in ps('-ax', check=True) if service_name(name) and serves(args, profile)]
     try:
         pid = int((control(profile) / 'service.pid').read_text())
     except (OSError, ValueError):
@@ -156,6 +164,77 @@ def prune_logs(profile):
         path.unlink(missing_ok=True)
 
 
+def systemd_unit(profile):
+    """Return the user unit that runs this profile, or None when its process is not systemd's (tmux, a shell, or nothing).
+
+    Only a process systemd started has `systemd` as its parent, and that unit must also list the PID as its main process;
+    a profile with no single running process is left to `start`.
+    """
+    pids = processes(profile)
+    if len(pids) != 1:
+        return None
+    if parent_name(pids[0]) != 'systemd':
+        return None
+    unit = f'dsh-{profile}.service'
+    result = subprocess.run(['systemctl', '--user', 'show', '-p', 'LoadState', '-p', 'MainPID', unit],
+                            capture_output=True, text=True)
+    fields = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+    return unit if fields.get('LoadState') == 'loaded' and fields.get('MainPID') == str(pids[0]) else None
+
+
+def parent_name(pid):
+    """Return the command name of `pid`'s parent, read from /proc, or None where /proc is unavailable."""
+    try:
+        status = Path(f'/proc/{pid}/status').read_text()
+    except OSError:
+        return None
+    ppid = next((line.split()[1] for line in status.splitlines() if line.startswith('PPid:')), None)
+    if ppid is None:
+        return None
+    try:
+        return Path(f'/proc/{ppid}/comm').read_text().strip()
+    except OSError:
+        return None
+
+
+def delegate(unit, args):
+    """Run start, stop, or restart through systemd, which supervises this profile, and report the health this script reports."""
+    print(f'{unit} supervises this profile; using systemctl --user {args.action} {unit}', flush=True)
+    if args.action == 'stop':
+        # Record the intentional stop before asking systemd, so a monitoring restart respects it.
+        (control(args.profile) / 'manually-stopped').write_text(time.strftime('%Y-%m-%dT%H:%M:%S%z') + '\n')
+        subprocess.run(['systemctl', '--user', 'stop', unit], check=True)
+        (control(args.profile) / 'service.pid').unlink(missing_ok=True)
+        print('dsh-superagent stopped. Automatic recovery is paused until start/restart.', flush=True)
+        return 0
+    # A unit that hit its start limit stays failed until the counter is reset; a restart then starts it again.
+    subprocess.run(['systemctl', '--user', 'reset-failed', unit], capture_output=True)
+    subprocess.run(['systemctl', '--user', args.action, unit], check=True)
+    (control(args.profile) / 'manually-stopped').unlink(missing_ok=True)
+    return wait_ready(args)
+
+
+def wait_ready(args):
+    """Report the health this script's exit codes describe once the service answers, or raise when it never does."""
+    deadline = time.monotonic() + args.timeout
+    while time.monotonic() < deadline:
+        current = state(args.url)
+        if processes(args.profile) and runtime_up(current):
+            code = status(args)
+            if current['setup']:
+                print('dsh-superagent is waiting for setup: ' + str(current['setup'].get('detail', '')))
+                print('Open the URL DSH printed in the log, then the dsh-superagent overview.')
+            if current['feishu']:
+                print('dsh-superagent runs without Feishu: ' + str(current['feishu'].get('detail', '')))
+                print('Fix it on the Feishu card of the Source settings.')
+            for name, detail in part_errors(current).items():
+                print(f'{name} reports an error, which a restart does not fix: {detail}')
+            return code
+        time.sleep(1)
+    status(args)
+    raise RuntimeError('Startup health check timed out; inspect the log. Any running process was left intact.')
+
+
 def start(args):
     session = 'dsh-' + args.profile
     pids = processes(args.profile)
@@ -187,23 +266,7 @@ def start(args):
         (control(args.profile) / 'service.pid').write_text(f'{pids[0]}\n')
         print(f'dsh-superagent already running (PID {pids[0]}); no duplicate started.', flush=True)
     (control(args.profile) / 'manually-stopped').unlink(missing_ok=True)
-    deadline = time.monotonic() + args.timeout
-    while time.monotonic() < deadline:
-        current = state(args.url)
-        if processes(args.profile) and runtime_up(current):
-            code = status(args)
-            if current['setup']:
-                print('dsh-superagent is waiting for setup: ' + str(current['setup'].get('detail', '')))
-                print('Open the URL DSH printed in the log, then the dsh-superagent overview.')
-            if current['feishu']:
-                print('dsh-superagent runs without Feishu: ' + str(current['feishu'].get('detail', '')))
-                print('Fix it on the Feishu card of the Source settings.')
-            for name, detail in part_errors(current).items():
-                print(f'{name} reports an error, which a restart does not fix: {detail}')
-            return code
-        time.sleep(1)
-    status(args)
-    raise RuntimeError('Startup health check timed out; inspect the log. Any running process was left intact.')
+    return wait_ready(args)
 
 
 def main():
@@ -234,6 +297,10 @@ def main():
             return 0
         if args.action == 'status':
             return status(args)
+        # A profile systemd already supervises is systemd's to stop and start; this script would only race it.
+        unit = systemd_unit(args.profile)
+        if unit is not None:
+            return delegate(unit, args)
         if args.action in ('stop', 'restart'):
             # Only a stop keeps automatic recovery off; a restart whose stop timed out leaves it on.
             stop(args, intentional=args.action == 'stop')

@@ -1,6 +1,6 @@
 /** Word counting and string formatting utilities for IM message limits and templates. */
 const words = new Intl.Segmenter('zh', { granularity: 'word' })
-export const IM_WORDS = 100
+export const IM_WORDS = 300
 export const NOTE_WORDS = 30
 /** Counts word-like segments across Chinese, English, and mixed text, ignoring punctuation. */
 export function wordCount(text: string): number {
@@ -8,10 +8,12 @@ export function wordCount(text: string): number {
   for (const segment of words.segment(text)) if (segment.isWordLike) count++
   return count
 }
+/** A failure retrying cannot fix, such as text the target will always refuse; delivery drops such a message. */
+export class Permanent extends Error {}
 /** Validates that an outgoing IM Markdown message does not exceed `IM_WORDS` (link labels and URLs both count toward the limit). */
 export function checkedImText(text: string): string {
   const count = wordCount(text)
-  if (count > IM_WORDS) throw new Error(`IM message has ${count} words; maximum is ${IM_WORDS}. Rewrite as a short high-level update. Do not split it into multiple messages.`)
+  if (count > IM_WORDS) throw new Permanent(`IM message has ${count} words; maximum is ${IM_WORDS}. Rewrite as a short high-level update. Do not split it into multiple messages.`)
   return text
 }
 export const fill = (template: string, values: Record<string, string>): string => template.replace(/\{(\w+)\}/g, (_, name: string) => values[name] ?? '')

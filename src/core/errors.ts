@@ -8,6 +8,7 @@ export const USER_ERRORS = {
   unknownPromptRevision: ['missing', 'Unknown prompt revision {revision}'],
   unknownPromptPart: ['refused', 'Unknown built-in prompt part {part}'],
   ticketEnded: ['refused', 'Ticket has ended'],
+  attachmentOutsideTicket: ['refused', 'A reply attachment must be a file inside the ticket directory'],
   assignmentEnded: ['refused', 'Assignment has ended; a newer assignment owns this ticket'],
   evalFinished: ['refused', 'Eval {eval} has finished or a later eval replaced it; decide the trigger\'s current eval'],
   notAdmissible: ['refused', 'Trigger is not admissible: {reason}'],

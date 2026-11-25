@@ -93,6 +93,15 @@ export function mandateInstructions(mandate: Pick<Mandate, 'strength'>): string 
     + 'internal to one module within the accepted rule scope. If it requires public-interface or behavior changes, new interaction, product '
     + 'decisions or clarification, stop and report dropped; do not expand scope.' : ''
 }
+/** The workspace folder a role's tickets live in, from the title prefix the orchestrator adds (`[排查] …`). */
+const ROLE_FOLDERS: Record<string, string> = { 开发: 'dev', 排查: 'troubleshoot', 测试: 'qa', 发布: 'release',
+  dev: 'dev', troubleshoot: 'troubleshoot', qa: 'qa', release: 'release' }
+export function roleFolder(title: string): string | undefined {
+  const match = /^\s*\[([^\]]{1,20})\]/.exec(title)
+  if (!match) return undefined
+  const name = match[1]!.trim()
+  return ROLE_FOLDERS[name.toLowerCase()] ?? ROLE_FOLDERS[name]
+}
 /** Builds a newly accepted ticket's Execution metadata: its worktree name, workspace directory, and assignment text. */
 export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>, settings: Settings,
   stateDir: string): Execution {
@@ -107,7 +116,12 @@ export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutco
   const assignment = ticket.mandate.strength === 'inferred' && ruleIds
     ? `Proactively accepted under ${ruleIds.join(', ')}. Scope: ${outcome.scope}.${precedence}${note}`
     : note.trim()
-  return { name, directory: join(executionRoot(settings, stateDir), name), assignment }
+  // A role prefix in the title selects that role's workspace: the Session runs in the shared role directory and keeps
+  // each ticket's checkout in its own subdirectory, so the workspace list stays at one entry per role.
+  const folder = roleFolder(ticket.title)
+  const root = executionRoot(settings, stateDir)
+  const worktree = join(root, ...folder ? [folder] : [], name)
+  return { name, directory: folder ? join(root, folder) : worktree, worktree, assignment }
 }
 /** Character limits for inline assignment and trigger text in worker messages; longer text is read via its resource. */
 const ASSIGNMENT_CHARS = 1500, TRIGGER_CHARS = 600
@@ -198,12 +212,19 @@ export class WorkerSlots {
   free(ticketId: string): void { this.starting.delete(ticketId) }
 }
 
+/** A failure's own message plus what it wrapped, so an AggregateError does not hide the reason it is reported for. */
+export function described(error: unknown): string {
+  if (!(error instanceof AggregateError)) return String(error)
+  return [String(error), ...[...error.errors].map(inner => `cause: ${String(inner)}`)].join('; ')
+}
+
 /**
  * Executes ticket assignments in persistent per-ticket DSH worker sessions and isolated workspace directories.
  * Queues launches and input deliveries through Effects, manages concurrency with WorkerSlots, listens for `agent/status`,
  * `agent/inbox/claimed`, `session/event` and `agent/error` events on the Cordis context, and reports status transitions back to Engine.
  * Runtime, Engine, worker tools, and management routes use this class to prepare, launch, deliver to, stop, and resume ticket assignments.
  */
+
 export class DshExecutor implements Executor {
   private readonly disposers: (() => void)[] = []
   private readonly slots: WorkerSlots
@@ -430,9 +451,12 @@ export class DshExecutor implements Executor {
     }
     const source = sourceTrigger(this.host, ticket)
     const workspace = ticket.execution?.directory ?? ''
+    // A role ticket's Session sits in a shared role directory that usually exists already; what the prepare command must
+    // produce is the ticket's own checkout, so its absence is what decides.
+    const prepared = ticket.execution?.worktree && ticket.execution.worktree !== workspace ? ticket.execution.worktree : workspace
     if (!current()) return
-    // Prepare the workspace directory once; an existing directory counts as already prepared, including worktrees created before `prepare` commands existed.
-    if (!await stat(workspace).then(() => true, () => false)) {
+    // Prepare once; an existing path counts as already prepared, including worktrees created before `prepare` commands existed.
+    if (!await stat(prepared).then(() => true, () => false)) {
       await this.prepareDirectory(ticket)
       if (!current()) return
     }
@@ -539,7 +563,7 @@ export class DshExecutor implements Executor {
   private background(work: Promise<void>): Promise<void> {
     const { health } = this.host
     return work.then(() => { if (health.get()?.state === 'error') health.set({ state: 'ready', detail: 'Worker events are handled', at: now() }) },
-      (error: unknown) => { health.set({ state: 'error', detail: String(error), at: now() }) })
+      (error: unknown) => { health.set({ state: 'error', detail: described(error), at: now() }) })
   }
   /**
    * Checks whether `error` is a transient failure with retry attempts remaining under `key`, mutating `this.transient`:

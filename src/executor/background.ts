@@ -113,7 +113,12 @@ export async function killJobs(ctx: Context, sessionId: string, reason: string, 
   const failures: unknown[] = []
   // The waits start before the kills, so each end counts as collected.
   const collected = live.map(job => jobs!.wait(job.id, KILL_WAIT_MS, sessionId).catch(() => undefined))
-  for (const job of live) try { jobs!.kill(job.id, sessionId, reason) } catch (error) { failures.push(error) }
+  for (const job of live) {
+    try { jobs!.kill(job.id, sessionId, reason) } catch (error) {
+      // A job that settled between the list and the kill needs no stop; only a job that still runs is a failure.
+      if (owned(jobs!, sessionId, except).some(item => item.id === job.id)) failures.push(error)
+    }
+  }
   await Promise.all(collected)
   if (failures.length) throw new AggregateError(failures, `Killing the shell jobs of ${sessionId} failed`)
 }

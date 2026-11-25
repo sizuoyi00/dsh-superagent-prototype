@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { expect, it, vi } from 'vitest'
-import { stopSubagents, untilQuiet } from '../src/executor/background.ts'
+import { killJobs, stopSubagents, untilQuiet } from '../src/executor/background.ts'
 import { jobRegistry } from './fixtures/host.ts'
 
 /** A context with DSH's job registry and subagents, and an idle worker agent with one live subagent, `child-1`. */
@@ -74,4 +74,13 @@ it('gives up a release of subagents that does not end within 10 seconds, and can
     await stopping
   } finally { vi.useRealTimers() }
   expect(agent.cancel).toHaveBeenCalledWith({ kind: 'user' }, { keepInbox: false })
+})
+
+it('reports no failure for a job that settled between the list and the kill', async () => {
+  const jobs = jobRegistry()
+  const id = jobs.run('worker-t1')
+  // DSH answers an unknown job with an error, as it does for one that ended and was dropped meanwhile.
+  jobs.service.kill.mockImplementation(() => { jobs.end(id); throw Object.assign(new Error(`unknown job ${id}`), { code: 'JOB_NOT_FOUND' }) })
+  const ctx = { get: () => jobs.service } as unknown as Context
+  await expect(killJobs(ctx, 'worker-t1', 'the Assignment ended')).resolves.toBeUndefined()
 })

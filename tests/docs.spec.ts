@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
-import { dirname, join, relative, resolve } from 'node:path'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
@@ -8,6 +8,12 @@ const NUMBERED = /^(\d{3})-[a-z0-9-]+\.md$/
 const numbered = readdirSync(join(ROOT, 'docs')).filter(name => NUMBERED.test(name)).sort()
 const entries = ['README.md', 'SETUP.md']
 const documents = [...entries, ...readdirSync(join(ROOT, 'docs')).filter(name => name.endsWith('.md')).map(name => `docs/${name}`)]
+const mirrors: [string, string][] = [
+  ['README.md', 'README.zh-CN.md'],
+  ['SETUP.md', 'SETUP.zh-CN.md'],
+  ...numbered.map(name => [`docs/${name}`, `docs/${name.replace(/\.md$/, '.zh-CN.md')}`] as [string, string]),
+  ['prompts/dispatch.md', 'prompts/dispatch.zh-CN.md'],
+]
 const read = (path: string): string => readFileSync(join(ROOT, path), 'utf8')
 function links(file: string): string[] {
   return [...readFileSync(file, 'utf8').matchAll(/\]\(([^)\s]+)\)/g)].map(match => match[1]!.split('#')[0]!).filter(target => target && !/^[a-z]+:/.test(target))
@@ -38,17 +44,30 @@ describe('documentation', () => {
   it('numbers documents consecutively from 000', () => {
     expect(numbered.map(name => name.slice(0, 3))).toEqual(numbered.map((_, index) => String(index).padStart(3, '0')))
   })
-  it('links numbered documents only to earlier numbered documents', () => {
+  it('links numbered documents only to earlier numbered documents or their localized mirror', () => {
     const violations = numbered.flatMap(name => links(join(ROOT, 'docs', name)).flatMap(target => {
       const linked = resolve(ROOT, 'docs', target)
       if (!linked.endsWith('.md')) return []
+      if (linked === join(ROOT, 'docs', name.replace(/\.md$/, '.zh-CN.md'))) return []
       const number = NUMBERED.exec(linked.slice(linked.lastIndexOf('/') + 1))?.[1]
       return dirname(linked) === join(ROOT, 'docs') && number !== undefined && number < name.slice(0, 3) ? [] : [`${name} → ${target}`]
     }))
     expect(violations).toEqual([])
   })
+  it('keeps every English and Chinese document mirror linked in both directions', () => {
+    const missing = mirrors.flatMap(([english, chinese]) => {
+      if (!existsSync(join(ROOT, english)) || !existsSync(join(ROOT, chinese))) return [`${english} ↔ ${chinese}`]
+      const englishBanner = read(english).split('\n').slice(0, 5).join('\n')
+      const chineseBanner = read(chinese).split('\n').slice(0, 5).join('\n')
+      return [
+        ...(englishBanner.includes(`](${basename(chinese)})`) ? [] : [`${english} → ${chinese}`]),
+        ...(chineseBanner.includes(`](${basename(english)})`) ? [] : [`${chinese} → ${english}`]),
+      ]
+    })
+    expect(missing).toEqual([])
+  })
   it('resolves every local link', () => {
-    const files = [...entries.map(name => join(ROOT, name)), ...numbered.map(name => join(ROOT, 'docs', name))]
+    const files = [...new Set([...documents, 'README.zh-CN.md', 'SETUP.zh-CN.md', 'prompts/dispatch.md', 'prompts/dispatch.zh-CN.md'])].map(name => join(ROOT, name))
     const missing = files.flatMap(file => links(file).filter(target => !existsSync(resolve(dirname(file), target))).map(target => `${file.slice(ROOT.length + 1)} → ${target}`))
     expect(missing).toEqual([])
   })

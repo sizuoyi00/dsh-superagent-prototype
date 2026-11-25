@@ -1,5 +1,6 @@
 /** Main plugin entry: mounts the Runtime and provides its restart callback for deployment account changes. */
 import type { Context } from '@deepseek-ai/cordis'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-settings'
 import { Runtime } from './app/runtime.ts'
 import { Config, machineOf, type DeploymentConfig } from './deployment.ts'
@@ -15,10 +16,25 @@ export async function apply(ctx: Context, config: DeploymentConfig): Promise<voi
   // serving this entry while dsh-superagent restarts and rereads it only on a configuration write, so trigger `describe()`
   // after restart to keep open configuration forms editable without a page reload.
   // TODO: drop the read once DSH's settings service rereads an entry whose plugin becomes active again.
+  //
+  // A restart replaces this plugin's tools and state, so it waits for the main Session's turn to end: restarting in the
+  // middle of a turn unregisters the orchestrator_* tools that turn is calling, and cancelling the turn instead would
+  // report "tool call aborted" for a restart the turn itself asked for. One restart is scheduled at a time.
+  let restarting = false
   const restart = (): void => {
-    ctx.fiber.restart().then(() => { ctx.get('settings')?.describe() }).catch((error: unknown) => { ctx.logger.error('dsh-superagent restart failed: %s', String(error)) })
+    if (restarting) return
+    restarting = true
+    const run = (): void => {
+      ctx.fiber.restart().then(() => { ctx.get('settings')?.describe() })
+        .catch((error: unknown) => { ctx.logger.error('dsh-superagent restart failed: %s', String(error)) })
+        .finally(() => { restarting = false })
+    }
+    const master = ctx.agents.get(runtime.masterId as SessionId)
+    if (master !== undefined && master.status === 'running') void master.whenIdle().then(run, run)
+    else run()
   }
-  const runtime = new Runtime(ctx, machine, restart)
+  let runtime: Runtime
+  runtime = new Runtime(ctx, machine, restart)
   ctx.effect(() => async () => { await runtime.stop() })
   await runtime.ready
   ctx.logger.info(runtime.configured() ? 'dsh-superagent ready; the Superagent sidebar entry opens the management panel' : `dsh-superagent is waiting for setup: ${runtime.setupProblem?.detail ?? ''}`)
